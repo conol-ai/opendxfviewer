@@ -10,6 +10,7 @@
 //! * [`scene`] — the render model plus the spatial index used for view culling.
 //! * [`camera`] — the world↔screen mapping, pan, zoom and fit.
 //! * [`canvas`] — the custom Makepad widget that draws a scene and handles navigation.
+//! * [`layers`] — the layer visibility panel.
 //! * [`app`] — the application shell: window chrome, layer panel, file loading.
 pub use makepad_widgets;
 
@@ -19,6 +20,7 @@ pub mod camera;
 pub mod canvas;
 pub mod convert;
 pub mod geom;
+pub mod layers;
 pub mod render;
 pub mod scene;
 pub mod spatial;
