@@ -147,6 +147,12 @@ libasound2-dev`.
 how a drawing looks — culling, decimation, line weights, when to re-tessellate a
 curve — are then testable without a GPU.
 
+If you are touching the Makepad side, read
+[`docs/makepad-notes.md`](docs/makepad-notes.md) first. Several of Makepad 1.0's
+rules fail at runtime with no compiler help, and a few fail with no message at
+all; that file records the ones this project hit, and what each looks like when
+you get it wrong.
+
 ### Test fixtures
 
 `tests/fixtures/` holds hand-written ASCII DXF covering the cases that break
