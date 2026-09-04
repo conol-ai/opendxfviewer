@@ -3,7 +3,7 @@ use opendxfviewer::{convert, scene::CurveSource};
 
 fn main() {
     for f in std::env::args().skip(1) {
-        let dr = dxf::Drawing::load_file(&f).unwrap();
+        let dr = opendxfviewer::read::load(&f).unwrap();
         let s = convert::convert(&dr, &convert::Options::default());
         println!(
             "== {f}: {} polys {} dots {} tris {} texts",

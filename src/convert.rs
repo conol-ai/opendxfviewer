@@ -184,7 +184,11 @@ impl<'a> Ctx<'a> {
         let ents: Vec<&Entity> = self.dr.entities().collect();
         self.scene.stats.entities_read = ents.len();
         for e in ents {
+            let before = self.scene.stats.primitives;
             self.emit(e, &root);
+            if self.scene.stats.primitives == before {
+                self.scene.stats.entities_skipped += 1;
+            }
         }
     }
 
@@ -341,7 +345,7 @@ impl<'a> Ctx<'a> {
         if let Some(l) = self.scene.layers.get_mut(layer as usize) {
             l.count += 1;
         }
-        self.scene.stats.entities_drawn += 1;
+        self.scene.stats.primitives += 1;
     }
 
     fn warn(&mut self, msg: String) {
@@ -1190,7 +1194,7 @@ mod tests {
 
     fn load(name: &str) -> Scene {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-        let dr = Drawing::load_file(&path).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+        let dr = crate::read::load(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
         convert(&dr, &Options::default())
     }
 
@@ -1548,11 +1552,28 @@ mod tests {
     // -- robustness ------------------------------------------------------------------------
 
     #[test]
+    fn text_is_decoded_with_the_encoding_the_header_implies() {
+        // showcase.dxf is R2007, so UTF-8.
+        let s = load("showcase.dxf");
+        assert!(
+            s.texts.iter().any(|t| t.text.contains('Ø')),
+            "UTF-8 diameter sign was mangled: {:?}",
+            s.texts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        // latin1.dxf is R2000 and written in Windows-1252.
+        let s = load("latin1.dxf");
+        let all: Vec<&str> = s.texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(all.iter().any(|t| t.contains("Ø20")), "{all:?}");
+        assert!(all.iter().any(|t| t.contains("für")), "{all:?}");
+        assert!(all.iter().any(|t| t.contains("Maßstab")), "{all:?}");
+    }
+
+    #[test]
     fn an_empty_drawing_converts_to_an_empty_scene() {
         let s = load("empty.dxf");
         assert!(s.is_empty());
         assert!(s.bounds.is_empty());
-        assert_eq!(s.stats.entities_drawn, 0);
+        assert_eq!(s.stats.primitives, 0);
     }
 
     #[test]
@@ -1597,7 +1618,7 @@ mod tests {
             }
             // Layer counts must add up to what was drawn.
             let total: u32 = s.layers.iter().map(|l| l.count).sum();
-            assert_eq!(total as usize, s.stats.entities_drawn, "{f}: layer counts disagree");
+            assert_eq!(total as usize, s.stats.primitives, "{f}: layer counts disagree");
         }
     }
 
@@ -1622,10 +1643,20 @@ mod tests {
     }
 
     #[test]
+    fn a_block_instance_produces_more_primitives_than_entities() {
+        let s = load("blocks.dxf");
+        // Seven INSERTs expand into 137 polylines, so the two counters must not be conflated.
+        assert_eq!(s.stats.entities_read, 7);
+        assert_eq!(s.stats.primitives, 137);
+        // The dangling INSERT drew nothing.
+        assert_eq!(s.stats.entities_skipped, 1);
+    }
+
+    #[test]
     fn unsupported_entities_are_counted_rather_than_dropped_silently() {
         let s = load("polylines.dxf");
         // Nothing unsupported in this file, but the field must exist and be consistent.
         assert!(s.stats.unsupported.iter().all(|(_, n)| *n > 0));
-        assert!(s.stats.entities_drawn > 0);
+        assert!(s.stats.primitives > 0);
     }
 }

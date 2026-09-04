@@ -462,7 +462,7 @@ mod tests {
 
     fn scene_of(name: &str) -> Scene {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-        let dr = dxf::Drawing::load_file(&path).unwrap();
+        let dr = crate::read::load(&path).unwrap();
         convert(&dr, &Options::default())
     }
 

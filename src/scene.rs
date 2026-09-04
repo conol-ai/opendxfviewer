@@ -149,8 +149,13 @@ pub struct Linetype {
 /// Everything `convert` could not represent, surfaced in the UI rather than silently dropped.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
+    /// Entities in the file's ENTITIES section.
     pub entities_read: usize,
-    pub entities_drawn: usize,
+    /// Renderable primitives produced from them. Higher than `entities_read` whenever a block is
+    /// instanced, since one INSERT expands into everything the block contains.
+    pub primitives: usize,
+    /// Entities that produced nothing at all, because they were unsupported or degenerate.
+    pub entities_skipped: usize,
     /// Entity type name -> how many were skipped.
     pub unsupported: Vec<(String, usize)>,
     /// Non-fatal problems: missing blocks, malformed splines, recursion limits.

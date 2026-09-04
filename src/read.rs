@@ -1,0 +1,221 @@
+//! Reading a DXF file with the right text encoding.
+//!
+//! `dxf::Drawing::load_file` hardcodes Windows-1252. That is a reasonable default for DXF up to
+//! R2004, but the format switched to UTF-8 at R2007, and most files in circulation are newer than
+//! that — so loading them through the default mangles every non-ASCII character in a layer name,
+//! a text entity or a block name.
+//!
+//! The version and the code page both live in the `HEADER` section, at the very start of the file,
+//! so the encoding can be chosen from a short prefix without reading the whole thing twice.
+
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+
+use encoding_rs::Encoding;
+
+/// How much of the file to sniff. `$ACADVER` is the first header variable AutoCAD writes and
+/// `$DWGCODEPAGE` follows within a few dozen, so this is generous.
+const SNIFF_BYTES: usize = 64 * 1024;
+
+/// Read and parse a DXF file, choosing the text encoding from its header.
+pub fn load(path: impl AsRef<Path>) -> Result<dxf::Drawing, String> {
+    let path = path.as_ref();
+    let head = read_prefix(path).map_err(|e| format!("Could not read this file: {e}"))?;
+    let encoding = sniff(&head);
+    dxf::Drawing::load_file_with_encoding(path, encoding)
+        .map_err(|e| format!("Could not read this file: {e}"))
+}
+
+fn read_prefix(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut f = File::open(path)?;
+    let mut buf = vec![0u8; SNIFF_BYTES];
+    let mut filled = 0;
+    // A short read is not EOF, so keep going until the buffer is full or the file runs out.
+    while filled < buf.len() {
+        match f.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
+/// Pick a text encoding from a DXF header prefix.
+pub fn sniff(head: &[u8]) -> &'static Encoding {
+    // A byte-order mark settles it outright.
+    if head.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return encoding_rs::UTF_8;
+    }
+    // The prefix is scanned as Latin-1 so that a UTF-8 file with multibyte characters later on
+    // cannot make the header itself unreadable. Every marker we look for is ASCII.
+    let text: String = head.iter().map(|&b| b as char).collect();
+
+    if let Some(v) = header_value(&text, "$ACADVER") {
+        // AC1021 is R2007, the release that moved DXF to UTF-8. The version strings sort
+        // lexicographically in release order, which is why a plain comparison is enough.
+        if v.as_str() >= "AC1021" {
+            return encoding_rs::UTF_8;
+        }
+    }
+    if let Some(cp) = header_value(&text, "$DWGCODEPAGE") {
+        if let Some(enc) = code_page(&cp) {
+            return enc;
+        }
+    }
+    // Pre-R2007 with no usable code page. Plenty of older writers emitted UTF-8 anyway, so prefer
+    // it when the prefix actually parses as UTF-8 and contains something non-ASCII to judge by.
+    if head.iter().any(|b| *b >= 0x80) && std::str::from_utf8(&head[..valid_prefix(head)]).is_ok() {
+        return encoding_rs::UTF_8;
+    }
+    encoding_rs::WINDOWS_1252
+}
+
+/// Trim a buffer back to the last byte that cannot be part of a truncated multi-byte sequence.
+fn valid_prefix(head: &[u8]) -> usize {
+    let mut end = head.len();
+    // A UTF-8 sequence is at most four bytes, so backing off three continuation bytes is enough.
+    for _ in 0..3 {
+        if end == 0 || head[end - 1] & 0b1100_0000 != 0b1000_0000 {
+            break;
+        }
+        end -= 1;
+    }
+    // Drop the lead byte of the truncated sequence too.
+    if end > 0 && head[end - 1] & 0b1000_0000 != 0 {
+        end -= 1;
+    }
+    end
+}
+
+/// Find a `9 / $NAME` header variable and return the string value that follows it.
+///
+/// DXF is a flat stream of group code / value line pairs, so the value is simply the next
+/// non-empty line after the name.
+fn header_value(text: &str, name: &str) -> Option<String> {
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != name {
+            continue;
+        }
+        // Skip the group code line (1 for $ACADVER and $DWGCODEPAGE) and take the value.
+        let _code = lines.next()?;
+        let value = lines.next()?.trim();
+        if !value.is_empty() {
+            return Some(value.to_ascii_uppercase());
+        }
+    }
+    None
+}
+
+/// Map a DXF `$DWGCODEPAGE` name onto an encoding.
+fn code_page(name: &str) -> Option<&'static Encoding> {
+    let n = name.trim().to_ascii_uppercase();
+    let n = n.strip_prefix("ANSI_").unwrap_or(&n);
+    Some(match n {
+        "UTF8" | "UTF-8" => encoding_rs::UTF_8,
+        "874" => encoding_rs::WINDOWS_874,
+        "932" | "SHIFT_JIS" => encoding_rs::SHIFT_JIS,
+        "936" | "GBK" => encoding_rs::GBK,
+        "949" | "EUC_KR" => encoding_rs::EUC_KR,
+        "950" | "BIG5" => encoding_rs::BIG5,
+        "1250" => encoding_rs::WINDOWS_1250,
+        "1251" => encoding_rs::WINDOWS_1251,
+        "1252" => encoding_rs::WINDOWS_1252,
+        "1253" => encoding_rs::WINDOWS_1253,
+        "1254" => encoding_rs::WINDOWS_1254,
+        "1255" => encoding_rs::WINDOWS_1255,
+        "1256" => encoding_rs::WINDOWS_1256,
+        "1257" => encoding_rs::WINDOWS_1257,
+        "1258" => encoding_rs::WINDOWS_1258,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header(vars: &[(&str, &str)]) -> Vec<u8> {
+        let mut s = String::from("0\nSECTION\n2\nHEADER\n");
+        for (k, v) in vars {
+            s.push_str(&format!("9\n{k}\n1\n{v}\n"));
+        }
+        s.push_str("0\nENDSEC\n0\nEOF\n");
+        s.into_bytes()
+    }
+
+    #[test]
+    fn r2007_and_later_are_utf8() {
+        for v in ["AC1021", "AC1024", "AC1027", "AC1032"] {
+            assert_eq!(sniff(&header(&[("$ACADVER", v)])), encoding_rs::UTF_8, "{v}");
+        }
+    }
+
+    #[test]
+    fn pre_r2007_falls_back_to_its_code_page() {
+        let h = header(&[("$ACADVER", "AC1015"), ("$DWGCODEPAGE", "ANSI_1252")]);
+        assert_eq!(sniff(&h), encoding_rs::WINDOWS_1252);
+        let h = header(&[("$ACADVER", "AC1015"), ("$DWGCODEPAGE", "ANSI_936")]);
+        assert_eq!(sniff(&h), encoding_rs::GBK);
+        let h = header(&[("$ACADVER", "AC1014"), ("$DWGCODEPAGE", "ansi_932")]);
+        assert_eq!(sniff(&h), encoding_rs::SHIFT_JIS);
+    }
+
+    #[test]
+    fn an_unknown_code_page_falls_back_to_windows_1252() {
+        let h = header(&[("$ACADVER", "AC1015"), ("$DWGCODEPAGE", "ANSI_9999")]);
+        assert_eq!(sniff(&h), encoding_rs::WINDOWS_1252);
+        assert_eq!(sniff(&header(&[])), encoding_rs::WINDOWS_1252);
+        assert_eq!(sniff(b""), encoding_rs::WINDOWS_1252);
+    }
+
+    #[test]
+    fn a_byte_order_mark_wins() {
+        let mut h = vec![0xEF, 0xBB, 0xBF];
+        h.extend(header(&[("$ACADVER", "AC1015"), ("$DWGCODEPAGE", "ANSI_1252")]));
+        assert_eq!(sniff(&h), encoding_rs::UTF_8);
+    }
+
+    #[test]
+    fn an_old_file_that_is_really_utf8_is_read_as_utf8() {
+        // Plenty of writers emit UTF-8 whatever version they claim.
+        let mut h = header(&[("$ACADVER", "AC1015")]);
+        h.extend("0\nTEXT\n1\nBohrung Ø44\n".as_bytes());
+        assert_eq!(sniff(&h), encoding_rs::UTF_8);
+    }
+
+    #[test]
+    fn latin1_bytes_do_not_get_mistaken_for_utf8() {
+        let mut h = header(&[("$ACADVER", "AC1015")]);
+        // 0xD8 is Ø in Windows-1252 and an invalid UTF-8 lead byte here.
+        h.extend(b"0\nTEXT\n1\nBohrung \xD844\n");
+        assert_eq!(sniff(&h), encoding_rs::WINDOWS_1252);
+    }
+
+    #[test]
+    fn a_truncated_multibyte_sequence_at_the_sniff_boundary_is_not_a_failure() {
+        let mut h = header(&[("$ACADVER", "AC1015")]);
+        h.extend("0\nTEXT\n1\nvalid é text ".as_bytes());
+        h.extend(&[0xE5, 0x9B]); // the first two bytes of a three-byte character
+        assert_eq!(sniff(&h), encoding_rs::UTF_8, "a cut-off character must not force a fallback");
+    }
+
+    #[test]
+    fn pure_ascii_stays_on_the_conservative_default() {
+        // With nothing non-ASCII to judge by, the two encodings agree anyway.
+        let mut h = header(&[("$ACADVER", "AC1015")]);
+        h.extend(b"0\nTEXT\n1\nPLAIN ASCII\n");
+        assert_eq!(sniff(&h), encoding_rs::WINDOWS_1252);
+    }
+
+    #[test]
+    fn the_real_fixtures_load() {
+        for f in ["basic.dxf", "showcase.dxf", "curves.dxf"] {
+            let p = format!("{}/tests/fixtures/{f}", env!("CARGO_MANIFEST_DIR"));
+            assert!(load(&p).is_ok(), "{f} failed to load");
+        }
+        assert!(load("/definitely/not/here.dxf").is_err());
+    }
+}

@@ -148,6 +148,10 @@ pub struct App {
     startup_open: Option<PathBuf>,
     #[rust]
     startup_timer: Timer,
+    /// Last zoom level written to the status bar. Zoom-to-fit can only run inside the draw pass,
+    /// where an emitted action is not reliably dispatched, so the scale is polled instead.
+    #[rust]
+    shown_scale: f64,
 }
 
 impl LiveRegister for App {
@@ -227,10 +231,15 @@ impl App {
     fn refresh_status(&mut self, cx: &mut Cx) {
         let loaded = self.stats.entities_read > 0;
         let stats = if loaded {
+            let skipped = if self.stats.entities_skipped > 0 {
+                format!(" · {} not drawn", self.stats.entities_skipped)
+            } else {
+                String::new()
+            };
             format!(
-                "{} of {} entities · {} layers · {} ms",
-                self.stats.entities_drawn,
+                "{} entities · {} primitives · {} layers{skipped} · {} ms",
                 self.stats.entities_read,
+                self.stats.primitives,
                 self.layer_count,
                 self.stats.load_ms
             )
@@ -360,6 +369,14 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // Deferred closures from worker threads only run if the runner is pumped.
         self.ui_runner().handle(cx, event, &mut Scope::empty(), self);
+
+        let scale = self.ui.dxf_canvas(id!(canvas)).borrow().map(|c| c.camera().scale);
+        if let Some(scale) = scale {
+            if scale != self.shown_scale {
+                self.shown_scale = scale;
+                self.refresh_status(cx);
+            }
+        }
 
         if self.startup_timer.is_event(event).is_some() {
             self.startup_timer = Timer::empty();

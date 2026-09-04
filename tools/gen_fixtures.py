@@ -10,7 +10,9 @@ OUT = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
 class Dxf:
-    def __init__(self):
+    def __init__(self, version="AC1021", codepage="ANSI_1252"):
+        self.version = version           # AC1021 = R2007, the release that moved DXF to UTF-8
+        self.codepage = codepage
         self.p = []
         self.layers = []
         self.blocks = []   # (name, base, [entity chunks])
@@ -39,7 +41,8 @@ class Dxf:
 
         # ---- HEADER
         g(0, "SECTION"); g(2, "HEADER")
-        g(9, "$ACADVER"); g(1, "AC1015")
+        g(9, "$ACADVER"); g(1, self.version)
+        g(9, "$DWGCODEPAGE"); g(3, self.codepage)
         g(9, "$INSUNITS"); g(70, 4)          # millimeters
         g(9, "$EXTMIN"); g(10, -1000.0); g(20, -1000.0); g(30, 0.0)
         g(9, "$EXTMAX"); g(10, 1000.0); g(20, 1000.0); g(30, 0.0)
@@ -386,6 +389,15 @@ def f_large(n_cells=140):
     return d
 
 
+def f_latin1():
+    """Pre-R2007, so the text is Windows-1252 rather than UTF-8."""
+    d = Dxf(version="AC1015", codepage="ANSI_1252")
+    d.layer("0", 7)
+    d.add(text(0, 0, 5, "Bohrung \u00d820 f\u00fcr M6"))
+    d.add(text(0, 20, 5, "Ma\u00dfstab 1:2"))
+    return d
+
+
 def f_malformed():
     """Structurally odd but recoverable content."""
     d = Dxf()
@@ -403,6 +415,141 @@ def f_malformed():
     return d
 
 
+
+def f_showcase():
+    """A plausible mechanical drawing: a bearing bracket with a title block.
+
+    Exists mainly so the README screenshot shows something a CAD user recognises, but it also
+    exercises blocks, bulged polylines, text justification and layer colours together.
+    """
+    import math as m
+    d = Dxf()
+    d.layer("0", 7)
+    OUT = d.layer("OUTLINE", 7)
+    HID = d.layer("HIDDEN", 8, "DASHED")
+    CEN = d.layer("CENTRE", 4, "CENTER")
+    DIM = d.layer("DIMENSION", 3)
+    HAT = d.layer("HATCH", 8)
+    TXT = d.layer("TEXT", 2)
+    BRD = d.layer("BORDER", 7)
+
+    d.block("BOLT", (0, 0), [
+        circle(0, 0, 4.0, layer="0", color=0),
+        circle(0, 0, 2.6, layer="0", color=0),
+        line(-5.2, 0, 5.2, 0, layer="0", color=0),
+        line(0, -5.2, 0, 5.2, layer="0", color=0),
+    ])
+
+    # ---- front view: a bracket body with a bored boss and rounded corners
+    b = m.tan(m.radians(90) / 4)
+    d.add(lwpoly([(20, 40, 0), (20, 130, b), (28, 138, 0), (112, 138, b),
+                  (120, 130, 0), (120, 40, b), (112, 32, 0), (28, 32, b)],
+                 closed=True, layer="OUTLINE"))
+    d.add(circle(70, 96, 30, layer="OUTLINE"))
+    d.add(circle(70, 96, 22, layer="OUTLINE"))
+    d.add(circle(70, 96, 34, layer="HIDDEN"))
+    # bolt circle
+    for i in range(6):
+        a = m.radians(90 + i * 60)
+        d.add(insert("BOLT", 70 + 44 * m.cos(a), 96 + 44 * m.sin(a), layer="OUTLINE"))
+    d.add(circle(70, 96, 44, layer="CENTRE"))
+    # centre marks
+    d.add(line(28, 96, 112, 96, layer="CENTRE"))
+    d.add(line(70, 24, 70, 146, layer="CENTRE"))
+    # mounting slots, as bulged polylines
+    for x in (36, 104):
+        d.add(lwpoly([(x - 5, 44, 1.0), (x + 5, 44, 0), (x + 5, 60, 1.0), (x - 5, 60, 0)],
+                     closed=True, layer="OUTLINE"))
+
+    # ---- section view on the right, with hatching
+    sx = 150
+    d.add(lwpoly([(sx, 40), (sx + 46, 40), (sx + 46, 138), (sx, 138)], closed=True, layer="OUTLINE"))
+    d.add(lwpoly([(sx + 14, 66), (sx + 32, 66), (sx + 32, 112), (sx + 14, 112)],
+                 closed=True, layer="OUTLINE"))
+    # 45-degree section hatch, clipped to the part's cross-section (outer box minus the bore).
+    def hatch_span(x0, y0, x1, y1, step, box, hole=None):
+        import math as mm
+        lo = box[0] + box[1]                      # x + y at the near corner
+        hi = box[2] + box[3]
+        c = lo
+        while c <= hi:
+            # The line x + y = c, clipped to the box, then split around the hole.
+            pts = []
+            for (px, py) in ((box[0], c - box[0]), (box[2], c - box[2]),
+                             (c - box[1], box[1]), (c - box[3], box[3])):
+                if box[0] - 1e-9 <= px <= box[2] + 1e-9 and box[1] - 1e-9 <= py <= box[3] + 1e-9:
+                    pts.append((px, py))
+            if len(pts) >= 2:
+                pts.sort()
+                a, b2 = pts[0], pts[-1]
+                if mm.dist(a, b2) > 1e-6:
+                    segs = [(a, b2)]
+                    if hole:
+                        segs = clip_out(a, b2, hole)
+                    for (s0, s1) in segs:
+                        d.add(line(s0[0], s0[1], s1[0], s1[1], layer="HATCH"))
+            c += step
+        _ = (x0, y0, x1, y1)
+
+    def clip_out(a, b2, hole):
+        """Split segment a-b around an axis-aligned hole, returning the parts outside it."""
+        hx0, hy0, hx1, hy1 = hole
+        dx, dy = b2[0] - a[0], b2[1] - a[1]
+        t0, t1 = 0.0, 1.0
+        for (p, q) in ((-dx, a[0] - hx0), (dx, hx1 - a[0]), (-dy, a[1] - hy0), (dy, hy1 - a[1])):
+            if p == 0:
+                if q < 0:
+                    return [(a, b2)]              # parallel and outside: nothing to remove
+            else:
+                r = q / p
+                if p < 0:
+                    if r > t1: return [(a, b2)]
+                    t0 = max(t0, r)
+                else:
+                    if r < t0: return [(a, b2)]
+                    t1 = min(t1, r)
+        if t0 >= t1:
+            return [(a, b2)]
+        at = lambda t: (a[0] + dx * t, a[1] + dy * t)
+        out = []
+        if t0 > 1e-9: out.append((a, at(t0)))
+        if t1 < 1 - 1e-9: out.append((at(t1), b2))
+        return out
+
+    hatch_span(0, 0, 0, 0, 5.0,
+               (sx, 40, sx + 46, 138),
+               (sx + 14, 66, sx + 32, 112))
+    d.add(line(sx - 6, 96, sx + 52, 96, layer="CENTRE"))
+
+    # ---- dimension-ish annotation (extension + arrow lines)
+    def dim_h(x0, x1, y, label):
+        d.add(line(x0, y - 6, x0, y + 6, layer="DIMENSION"))
+        d.add(line(x1, y - 6, x1, y + 6, layer="DIMENSION"))
+        d.add(line(x0, y, x1, y, layer="DIMENSION"))
+        d.add(lwpoly([(x0, y), (x0 + 4, y + 1.4), (x0 + 4, y - 1.4)], closed=True, layer="DIMENSION"))
+        d.add(lwpoly([(x1, y), (x1 - 4, y + 1.4), (x1 - 4, y - 1.4)], closed=True, layer="DIMENSION"))
+        d.add(text((x0 + x1) / 2, y + 3, 5, label, halign=1, x2=(x0 + x1) / 2, y2=y + 3, layer="TEXT"))
+
+    dim_h(20, 120, 20, "100")
+    dim_h(sx, sx + 46, 172, "46")
+    d.add(text(70, 152, 6, "BEARING BRACKET", halign=1, x2=70, y2=152, layer="TEXT"))
+    d.add(text(sx + 23, 152, 6, "SECTION A-A", halign=1, x2=sx + 23, y2=152, layer="TEXT"))
+    d.add(text(70, 88, 5, "\u00d844 H7", halign=1, x2=70, y2=88, layer="TEXT"))
+    d.add(text(70, 12, 4, "TOLERANCE \u00b10.1 UNLESS STATED", halign=1, x2=70, y2=12, layer="TEXT"))
+
+    # ---- sheet border and title block
+    d.add(lwpoly([(0, 0), (250, 0), (250, 180), (0, 180)], closed=True, layer="BORDER"))
+    d.add(lwpoly([(4, 4), (246, 4), (246, 176), (4, 176)], closed=True, layer="BORDER"))
+    d.add(lwpoly([(156, 4), (246, 4), (246, 34), (156, 34)], closed=True, layer="BORDER"))
+    d.add(line(156, 24, 246, 24, layer="BORDER"))
+    d.add(line(156, 14, 246, 14, layer="BORDER"))
+    d.add(line(201, 14, 201, 24, layer="BORDER"))
+    d.add(text(159, 27, 4.0, "BEARING BRACKET", layer="TEXT"))
+    d.add(text(159, 17, 3.2, "SCALE 1:1", layer="TEXT"))
+    d.add(text(204, 17, 3.2, "SHEET 1/1", layer="TEXT"))
+    d.add(text(159, 7.5, 3.0, "opendxfviewer sample", layer="TEXT"))
+    return d
+
 FIXTURES = {
     "basic.dxf": f_basic,
     "polylines.dxf": f_polylines,
@@ -412,13 +559,19 @@ FIXTURES = {
     "ocs_3d.dxf": f_ocs,
     "empty.dxf": f_empty,
     "malformed.dxf": f_malformed,
+    "showcase.dxf": f_showcase,
+    "latin1.dxf": f_latin1,
 }
 
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     for name, fn in FIXTURES.items():
-        txt = fn().render()
-        (OUT / name).write_text(txt)
+        dxf = fn()
+        txt = dxf.render()
+        if dxf.codepage == "ANSI_1252" and dxf.version < "AC1021":
+            (OUT / name).write_bytes(txt.encode("cp1252", errors="replace"))
+        else:
+            (OUT / name).write_text(txt, encoding="utf-8")
         print(f"{name:16} {len(txt):>10,} bytes")
     import sys
     # Perf fixtures are git-ignored: generate them on demand, they are large.

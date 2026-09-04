@@ -5,6 +5,7 @@
 //! * [`geom`] — `f64` vector/transform/AABB primitives shared by everything below.
 //! * [`aci`] — the AutoCAD Color Index palette.
 //! * [`tessellate`] — turning DXF curve definitions (arcs, bulges, ellipses, NURBS) into polylines.
+//! * [`read`] — loading a file with the text encoding its header actually implies.
 //! * [`convert`] — walking a parsed [`dxf::Drawing`] into a flat, render-ready [`scene::Scene`],
 //!   resolving OCS, block instancing and colours along the way.
 //! * [`scene`] — the render model plus the spatial index used for view culling.
@@ -21,6 +22,7 @@ pub mod canvas;
 pub mod convert;
 pub mod geom;
 pub mod layers;
+pub mod read;
 pub mod render;
 pub mod scene;
 pub mod spatial;

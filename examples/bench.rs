@@ -7,17 +7,41 @@ use opendxfviewer::{
 };
 use std::time::Instant;
 
+/// Resident set size in MB, so the numbers below say where the memory actually goes.
+fn rss_mb() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output();
+        if let Ok(o) = out {
+            if let Ok(s) = String::from_utf8(o.stdout) {
+                if let Ok(kb) = s.trim().parse::<u64>() {
+                    return kb / 1024;
+                }
+            }
+        }
+    }
+    0
+}
+
 fn main() {
     let f = std::env::args().nth(1).expect("usage: bench <file.dxf>");
+    let base = rss_mb();
     let t0 = Instant::now();
-    let dr = dxf::Drawing::load_file(&f).unwrap();
+    let dr = opendxfviewer::read::load(&f).unwrap();
     let parse = t0.elapsed();
+    let after_parse = rss_mb();
 
     let t1 = Instant::now();
     let s = convert::convert(&dr, &convert::Options::default());
     let conv = t1.elapsed();
+    let after_convert = rss_mb();
+    drop(dr);
+    let after_drop = rss_mb();
 
     println!("{f}");
+    println!("  rss      base {base} MB -> parsed {after_parse} MB -> converted {after_convert} MB -> parser dropped {after_drop} MB");
     println!("  parse    {parse:>10.2?}  ({} entities)", s.stats.entities_read);
     println!(
         "  convert  {conv:>10.2?}  ({} polys, {} verts, {} dots, {} tris, {} texts)",
@@ -53,6 +77,7 @@ fn main() {
             render::build(&s, &c, &style, &mut b);
         }
         let per = t.elapsed() / n;
+        let _ = rss_mb();
         println!("  frame {label:>6}  {per:>9.2?}  {:>8} segs {:>7} tris {:>6} runs  (considered {}, drawn {})",
             b.segs.len(), b.tris.len(), b.runs.len(), b.considered, b.drawn);
     }

@@ -435,7 +435,7 @@ impl Widget for DxfCanvas {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.cam.set_view(Aabb::new(dv(rect.pos), dv(rect.pos + rect.size)));
 
@@ -446,9 +446,6 @@ impl Widget for DxfCanvas {
             if !b.is_empty() {
                 self.cam.fit(&b);
                 self.fitted = true;
-                // The status bar shows the zoom level, so it has to hear about this one.
-                let uid = self.widget_uid();
-                cx.widget_action(uid, &scope.path, DxfCanvasAction::ViewChanged);
             }
             self.pending_fit = false;
         }
