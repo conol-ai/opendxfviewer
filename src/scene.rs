@@ -51,6 +51,8 @@ pub struct Poly {
     pub lineweight: Option<i16>,
     /// Index into [`Scene::linetypes`].
     pub linetype: u16,
+    /// The entity's own dash-length multiplier (DXF group 48), on top of the drawing's `$LTSCALE`.
+    pub linetype_scale: f32,
     pub closed: bool,
     pub bbox: Aabb,
     pub source: CurveSource,
@@ -146,6 +148,12 @@ pub struct Linetype {
     pub total: f64,
 }
 
+impl Linetype {
+    pub fn is_solid(&self) -> bool {
+        self.pattern.is_empty() || self.total <= 0.0
+    }
+}
+
 /// Everything `convert` could not represent, surfaced in the UI rather than silently dropped.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -232,6 +240,8 @@ pub struct Scene {
     pub layers: Vec<Layer>,
     pub linetypes: Vec<Linetype>,
     pub bounds: Aabb,
+    /// The drawing's `$LTSCALE`: a global multiplier on every dash pattern.
+    pub linetype_scale: f64,
     pub units: Units,
     pub stats: Stats,
     /// Built by [`Scene::build_index`]; empty until then.

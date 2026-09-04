@@ -29,6 +29,7 @@ dropping a `.dxf` file onto the window.
 | Zoom step | `+` / `−` |
 | Layers | toggle in the left panel; **All** brings everything back |
 | Line weights | toggle in the toolbar to draw the file's stored widths |
+| Dashes | toggle to draw the file's linetypes, or force everything solid |
 | Background | toggle **Light**, which re-resolves colour index 7 |
 
 The status bar shows the cursor position in drawing units, the current scale,
@@ -63,6 +64,12 @@ Five DXF details are handled once, at load, so the renderer never sees them:
   backwards and is pinned by a test.
 - **Curves.** Arcs, bulges, ellipses and splines all become polylines, at a
   tolerance relative to each curve's own size.
+
+- **Linetypes.** Dash patterns are stored in drawing units and scaled by both
+  `$LTSCALE` and the entity's own multiplier, so how a dashed line looks depends
+  on the zoom. Dashes run continuously along a polyline rather than restarting
+  at each vertex, and a pattern whose whole cycle falls under a few pixels is
+  drawn solid instead of as noise.
 
 ### Known limitations
 

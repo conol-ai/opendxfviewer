@@ -12,6 +12,7 @@ use makepad_widgets::*;
 use crate::canvas::{DxfCanvasAction, DxfCanvasWidgetRefExt};
 use crate::convert;
 use crate::layers::{LayerItem, LayerList, LayerPanelAction};
+use crate::render;
 use crate::scene::{Scene, Stats, Units};
 
 live_design! {
@@ -67,6 +68,7 @@ live_design! {
                         zoom_out_btn = <Button> { text: "−" }
                         <View> { width: 10.0, height: Fill }
                         lw_check = <CheckBox> { text: "Line weights" }
+                        lt_check = <CheckBox> { text: "Dashes" }
                         bg_check = <CheckBox> { text: "Light" }
                         <View> { width: Fill, height: Fill }
                         title_label = <Label> {
@@ -284,6 +286,8 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        // Dashes are on by default, so the box has to start ticked or it contradicts the drawing.
+        self.ui.check_box(id!(lt_check)).set_active(cx, render::Style::default().use_linetypes);
         if let Some(arg) = std::env::args().nth(1) {
             // Opening straight from here races the window's own creation, so wait one tick.
             self.startup_open = Some(PathBuf::from(arg));
@@ -310,6 +314,12 @@ impl MatchEvent for App {
         if let Some(on) = self.ui.check_box(id!(lw_check)).changed(actions) {
             self.with_canvas(cx, |c, cx| {
                 c.style_mut().use_lineweights = on;
+                c.redraw(cx);
+            });
+        }
+        if let Some(on) = self.ui.check_box(id!(lt_check)).changed(actions) {
+            self.with_canvas(cx, |c, cx| {
+                c.style_mut().use_linetypes = on;
                 c.redraw(cx);
             });
         }

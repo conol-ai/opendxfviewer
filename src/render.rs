@@ -64,6 +64,11 @@ pub struct Style {
     pub max_text_px: f64,
     /// Stop after this many segments in one frame.
     pub max_segments: usize,
+    /// Draw the file's dash patterns instead of every line solid.
+    pub use_linetypes: bool,
+    /// A dash pattern whose full cycle is shorter than this on screen is drawn solid. Below a few
+    /// pixels a dash reads as noise, and costs a quad per dash to say nothing.
+    pub min_dash_px: f64,
 }
 
 impl Style {
@@ -77,6 +82,7 @@ impl Style {
             min_feature_px: self.min_feature_px.max(4.0),
             min_text_px: self.min_text_px.max(8.0),
             max_segments: self.max_segments.min(400_000),
+            min_dash_px: self.min_dash_px.max(16.0),
             ..*self
         }
     }
@@ -93,6 +99,8 @@ impl Default for Style {
             min_text_px: 4.0,
             max_text_px: 4000.0,
             max_segments: 1_500_000,
+            use_linetypes: true,
+            min_dash_px: 6.0,
         }
     }
 }
@@ -208,12 +216,13 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
                     return;
                 }
                 let hw = half_width(style, p.lineweight, scene, p.layer);
+                let dash = dash_pattern(scene, p, cam, style);
                 buf.clear();
                 let pts = refined(scene, idx as usize, cam, style, &mut buf);
                 // Nothing wider than a pixel apart can be told apart on screen, so skip vertices
                 // rather than transforming every one of a curve stored for a closer view.
                 let stride = stride_for(pts.len(), s.x.max(s.y));
-                emit_polyline(out, cam, pts, stride, p.closed, hw, p.color, &clip, style);
+                emit_polyline(out, cam, pts, stride, p.closed, hw, p.color, &clip, style, dash);
                 out.drawn += 1;
             }
             PrimKind::Dot => {
@@ -337,6 +346,83 @@ fn refined<'a>(
     }
 }
 
+/// A dash pattern resolved into screen pixels, or `None` for a solid line.
+///
+/// DXF stores dash lengths in drawing units, scaled by the drawing's `$LTSCALE` and again by the
+/// entity's own multiplier, so the on-screen length also depends on the zoom.
+#[derive(Copy, Clone)]
+struct Dash<'a> {
+    pattern: &'a [f64],
+    /// Drawing units to screen pixels, including both linetype scales.
+    scale: f64,
+    total: f64,
+}
+
+fn dash_pattern<'a>(
+    scene: &'a Scene,
+    p: &crate::scene::Poly,
+    cam: &Camera,
+    style: &Style,
+) -> Option<Dash<'a>> {
+    if !style.use_linetypes {
+        return None;
+    }
+    let lt = scene.linetypes.get(p.linetype as usize)?;
+    if lt.is_solid() {
+        return None;
+    }
+    let scale = scene.linetype_scale * p.linetype_scale as f64 * cam.scale;
+    let total = lt.total * scale;
+    if !total.is_finite() || total < style.min_dash_px {
+        return None;
+    }
+    Some(Dash { pattern: &lt.pattern, scale, total })
+}
+
+impl Dash<'_> {
+    /// Walk `len` pixels from pattern offset `at`, calling `f(start, end)` for each lit run.
+    ///
+    /// Returns the offset to resume from, so a polyline's dashes carry across its vertices rather
+    /// than restarting at every corner — which is what makes a dashed circle look right.
+    fn walk(&self, at: f64, len: f64, mut f: impl FnMut(f64, f64)) -> f64 {
+        let mut pos = 0.0;
+        let mut cursor = at.rem_euclid(self.total.max(f64::MIN_POSITIVE));
+        // Find which element of the pattern `cursor` lands in, and how far into it.
+        let (mut i, mut used) = (0usize, cursor);
+        while i < self.pattern.len() {
+            let e = (self.pattern[i] * self.scale).abs().max(DOT_PX);
+            if used < e {
+                break;
+            }
+            used -= e;
+            i += 1;
+        }
+        if i >= self.pattern.len() {
+            i = 0;
+            used = 0.0;
+        }
+        while pos < len {
+            let e = (self.pattern[i] * self.scale).abs().max(DOT_PX);
+            let take = (e - used).min(len - pos);
+            // A zero-length element is a dot, which the caller draws as a round cap.
+            if self.pattern[i] >= 0.0 {
+                f(pos, pos + take);
+            }
+            pos += take;
+            used += take;
+            if used >= e - 1e-12 {
+                used = 0.0;
+                i = (i + 1) % self.pattern.len();
+            }
+        }
+        cursor += len;
+        cursor.rem_euclid(self.total.max(f64::MIN_POSITIVE))
+    }
+}
+
+/// On-screen length of a pattern element that the file gives as zero, i.e. a dot.
+const DOT_PX: f64 = 0.6;
+
 /// How many vertices to skip for a polyline of `n` points spanning `px` pixels.
 ///
 /// Two samples per pixel is the most a display can resolve; beyond that the extra vertices only
@@ -361,6 +447,7 @@ fn emit_polyline(
     color: Rgb,
     clip: &Aabb,
     style: &Style,
+    dash: Option<Dash<'_>>,
 ) {
     if pts.len() < 2 {
         if let Some(&p) = pts.first() {
@@ -371,6 +458,8 @@ fn emit_polyline(
     debug_assert!(stride >= 1);
     let mut prev = cam.world_to_screen(pts[0]);
     let first = prev;
+    // Dashes run continuously along the whole polyline rather than restarting at each vertex.
+    let mut phase = 0.0f64;
     // Collapse runs of sub-pixel segments: a curve tessellated for a zoomed-in view emits hundreds
     // of vertices per pixel when zoomed out, and every one costs a quad.
     let min_step = style.min_feature_px.min(1.0);
@@ -387,7 +476,7 @@ fn emit_polyline(
             pending = Some(s);
             continue;
         }
-        push_seg(out, prev, s, half_w, color, clip);
+        phase = push_run(out, prev, s, half_w, color, clip, dash, phase);
         prev = s;
         pending = None;
         if out.segs.len() >= style.max_segments {
@@ -396,12 +485,39 @@ fn emit_polyline(
         }
     }
     if let Some(s) = pending {
-        push_seg(out, prev, s, half_w, color, clip);
+        phase = push_run(out, prev, s, half_w, color, clip, dash, phase);
         prev = s;
     }
     if closed {
-        push_seg(out, prev, first, half_w, color, clip);
+        push_run(out, prev, first, half_w, color, clip, dash, phase);
     }
+}
+
+/// Emit one polyline span, either solid or broken into the dash pattern, and return the pattern
+/// offset the next span should continue from.
+#[allow(clippy::too_many_arguments)]
+fn push_run(
+    out: &mut Batch,
+    a: V2,
+    b: V2,
+    half_w: f32,
+    color: Rgb,
+    clip: &Aabb,
+    dash: Option<Dash<'_>>,
+    phase: f64,
+) -> f64 {
+    let Some(d) = dash else {
+        push_seg(out, a, b, half_w, color, clip);
+        return phase;
+    };
+    let len = (b - a).len();
+    if !len.is_finite() || len <= 0.0 {
+        return phase;
+    }
+    let dir = (b - a) / len;
+    d.walk(phase, len, |s, e| {
+        push_seg(out, a + dir * s, a + dir * e, half_w, color, clip);
+    })
 }
 
 fn push_seg(out: &mut Batch, a: V2, b: V2, half_w: f32, color: Rgb, clip: &Aabb) {
@@ -603,6 +719,7 @@ mod tests {
             color: Rgb::WHITE,
             lineweight: None,
             linetype: 0,
+            linetype_scale: 1.0,
             closed: true,
             bbox: Aabb::new(v2(-100.0, -100.0), v2(100.0, 100.0)),
             // No curve source, so `refined` cannot rebuild it — decimation is the only lever.
@@ -646,6 +763,7 @@ mod tests {
             color: Rgb::WHITE,
             lineweight: None,
             linetype: 0,
+            linetype_scale: 1.0,
             closed: false,
             bbox: Aabb::new(v2(-5e5, 0.0), v2(5e5, 0.0)),
             source: CurveSource::None,
@@ -726,6 +844,7 @@ mod tests {
             color: Rgb::WHITE,
             lineweight,
             linetype: 0,
+            linetype_scale: 1.0,
             closed: false,
             bbox: Aabb::new(v2(-100.0, 0.0), v2(100.0, 0.0)),
             source: CurveSource::None,
@@ -784,6 +903,167 @@ mod tests {
         // The index over-reports; the batch must not.
         assert!(b.considered >= b.drawn);
         assert_eq!(b.drawn, s.polys.len() + s.dots.len());
+    }
+
+    // ---- dashed linetypes -------------------------------------------------------------
+
+    fn dashed_scene(pattern: &[f64], ltscale: f64) -> Scene {
+        let mut s = Scene { linetype_scale: ltscale, ..Scene::default() };
+        s.linetypes.push(crate::scene::Linetype::default()); // 0 = CONTINUOUS
+        s.linetypes.push(crate::scene::Linetype {
+            name: "DASHED".into(),
+            pattern: pattern.to_vec(),
+            total: pattern.iter().map(|v| v.abs()).sum(),
+        });
+        s.layers.push(crate::scene::Layer {
+            name: "0".into(),
+            color: Rgb::WHITE,
+            visible_in_file: true,
+            visible: true,
+            lineweight: None,
+            linetype: 1,
+            count: 1,
+        });
+        // A 1000-unit horizontal line.
+        s.verts.extend([v2(0.0, 0.0), v2(1000.0, 0.0)]);
+        s.polys.push(crate::scene::Poly {
+            start: 0,
+            len: 2,
+            layer: 0,
+            color: Rgb::WHITE,
+            lineweight: None,
+            linetype: 1,
+            linetype_scale: 1.0,
+            closed: false,
+            bbox: Aabb::new(v2(0.0, 0.0), v2(1000.0, 0.0)),
+            source: CurveSource::None,
+        });
+        s.bounds = s.polys[0].bbox;
+        s.build_index();
+        s
+    }
+
+    fn wide_cam(scale: f64) -> Camera {
+        Camera { center: v2(500.0, 0.0), scale, view: Aabb::new(V2::ZERO, v2(2000.0, 400.0)) }
+    }
+
+    #[test]
+    fn a_dashed_line_becomes_several_segments() {
+        // 20 units on, 10 off, at 1 px per unit: a 1000-unit line holds 33 full cycles.
+        let s = dashed_scene(&[20.0, -10.0], 1.0);
+        let mut b = Batch::default();
+        build(&s, &wide_cam(1.0), &Style::default(), &mut b);
+        assert!(b.segs.len() >= 30 && b.segs.len() <= 36, "{} dashes", b.segs.len());
+        // Every dash is 20 px long and they are 30 px apart — except the last, which the end of
+        // the line cuts short (1000 units is 33 and a third cycles).
+        let mut xs: Vec<f64> = b.segs.iter().map(|s| s.a.x).collect();
+        xs.sort_by(f64::total_cmp);
+        let last = xs.last().copied().unwrap();
+        for seg in &b.segs {
+            let len = (seg.b - seg.a).len();
+            if seg.a.x == last {
+                assert!(len > 0.0 && len <= 20.5, "final partial dash {len}");
+            } else {
+                assert!((len - 20.0).abs() < 0.5, "dash length {:?}", seg);
+            }
+        }
+        for w in xs.windows(2) {
+            assert!((w[1] - w[0] - 30.0).abs() < 0.5, "dash spacing {:?}", w);
+        }
+    }
+
+    #[test]
+    fn the_same_line_is_solid_without_a_linetype() {
+        let mut s = dashed_scene(&[20.0, -10.0], 1.0);
+        s.polys[0].linetype = 0;
+        let mut b = Batch::default();
+        build(&s, &wide_cam(1.0), &Style::default(), &mut b);
+        assert_eq!(b.segs.len(), 1);
+    }
+
+    #[test]
+    fn linetypes_can_be_turned_off_entirely() {
+        let s = dashed_scene(&[20.0, -10.0], 1.0);
+        let mut b = Batch::default();
+        build(&s, &wide_cam(1.0), &Style { use_linetypes: false, ..Style::default() }, &mut b);
+        assert_eq!(b.segs.len(), 1);
+    }
+
+    #[test]
+    fn a_pattern_too_fine_to_see_is_drawn_solid() {
+        // Zoomed out until the whole 30-unit cycle is under a pixel, dashes would be noise.
+        let s = dashed_scene(&[20.0, -10.0], 1.0);
+        let mut b = Batch::default();
+        build(&s, &wide_cam(0.01), &Style::default(), &mut b);
+        assert_eq!(b.segs.len(), 1, "expected a solid line, got {} dashes", b.segs.len());
+    }
+
+    #[test]
+    fn ltscale_stretches_the_pattern() {
+        let coarse = dashed_scene(&[20.0, -10.0], 4.0);
+        let fine = dashed_scene(&[20.0, -10.0], 1.0);
+        let mut a = Batch::default();
+        build(&coarse, &wide_cam(1.0), &Style::default(), &mut a);
+        let mut c = Batch::default();
+        build(&fine, &wide_cam(1.0), &Style::default(), &mut c);
+        assert!(a.segs.len() * 3 < c.segs.len(), "{} vs {}", a.segs.len(), c.segs.len());
+        // Four times the scale means four times the dash.
+        let la = (a.segs[0].b - a.segs[0].a).len();
+        let lc = (c.segs[0].b - c.segs[0].a).len();
+        assert!((la / lc - 4.0).abs() < 0.1, "{la} vs {lc}");
+    }
+
+    #[test]
+    fn an_entity_scale_multiplies_the_drawing_scale() {
+        let mut s = dashed_scene(&[20.0, -10.0], 2.0);
+        s.polys[0].linetype_scale = 3.0;
+        let mut b = Batch::default();
+        build(&s, &wide_cam(1.0), &Style::default(), &mut b);
+        // 20 units * 2 * 3 = 120 px per dash.
+        assert!(((b.segs[0].b - b.segs[0].a).len() - 120.0).abs() < 1.0, "{:?}", b.segs[0]);
+    }
+
+    #[test]
+    fn dashes_carry_across_vertices_rather_than_restarting() {
+        // Two collinear spans must produce the same dashes as one long span.
+        let one = dashed_scene(&[20.0, -10.0], 1.0);
+        let mut split = one.clone();
+        split.verts = vec![v2(0.0, 0.0), v2(500.0, 0.0), v2(1000.0, 0.0)];
+        split.polys[0].len = 3;
+        let mut a = Batch::default();
+        build(&one, &wide_cam(1.0), &Style::default(), &mut a);
+        let mut c = Batch::default();
+        build(&split, &wide_cam(1.0), &Style::default(), &mut c);
+        assert_eq!(a.segs.len(), c.segs.len(), "the extra vertex changed the dash count");
+        let round = |v: f64| (v * 100.0).round();
+        let xa: Vec<f64> = a.segs.iter().map(|s| round(s.a.x)).collect();
+        let xc: Vec<f64> = c.segs.iter().map(|s| round(s.a.x)).collect();
+        assert_eq!(xa, xc, "dashes restarted at the vertex");
+    }
+
+    #[test]
+    fn a_dot_in_the_pattern_still_draws_something() {
+        // CENTER-style: long dash, gap, dot, gap.
+        let s = dashed_scene(&[40.0, -10.0, 0.0, -10.0], 1.0);
+        let mut b = Batch::default();
+        build(&s, &wide_cam(1.0), &Style::default(), &mut b);
+        assert!(b.segs.iter().any(|g| (g.b - g.a).len() < 1.0), "no dot was drawn");
+        assert!(b.segs.iter().any(|g| (g.b - g.a).len() > 30.0), "no long dash was drawn");
+    }
+
+    #[test]
+    fn a_degenerate_pattern_cannot_hang_or_explode() {
+        for pattern in
+            [vec![0.0, 0.0], vec![-5.0, -5.0], vec![1e-12, -1e-12], vec![f64::MAX, -1.0], vec![1.0]]
+        {
+            let s = dashed_scene(&pattern, 1.0);
+            let mut b = Batch::default();
+            build(&s, &wide_cam(1.0), &Style::default(), &mut b);
+            assert!(b.segs.len() < 10_000, "pattern {pattern:?} produced {} segs", b.segs.len());
+            for seg in &b.segs {
+                assert!(seg.a.is_finite() && seg.b.is_finite(), "pattern {pattern:?}");
+            }
+        }
     }
 
     #[test]

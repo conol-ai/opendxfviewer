@@ -97,7 +97,13 @@ struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     fn new(dr: &'a Drawing, opts: Options) -> Ctx<'a> {
-        let mut scene = Scene { units: units_of(dr), ..Scene::default() };
+        let ltscale = dr.header.line_type_scale;
+        let mut scene = Scene {
+            units: units_of(dr),
+            // A zero or nonsensical $LTSCALE would collapse every dash to nothing.
+            linetype_scale: if ltscale.is_finite() && ltscale > 0.0 { ltscale } else { 1.0 },
+            ..Scene::default()
+        };
 
         // Linetypes first: layers reference them by name.
         let mut linetype_ids = HashMap::new();
@@ -277,11 +283,13 @@ impl<'a> Ctx<'a> {
 
     fn style(&mut self, e: &'a Entity, inh: &Inherit) -> Style {
         let layer = self.layer_of(e, inh);
+        let scale = e.common.line_type_scale;
         Style {
             layer,
             color: self.color_of(e, inh, layer),
             lineweight: lw(e.common.lineweight_enum_value),
             linetype: self.linetype_of(e, layer),
+            linetype_scale: if scale.is_finite() && scale > 0.0 { scale as f32 } else { 1.0 },
         }
     }
 
@@ -314,6 +322,7 @@ impl<'a> Ctx<'a> {
             color: st.color,
             lineweight: st.lineweight,
             linetype: st.linetype,
+            linetype_scale: st.linetype_scale,
             closed,
             bbox,
             source,
@@ -906,6 +915,7 @@ struct Style {
     color: Rgb,
     lineweight: Option<i16>,
     linetype: u16,
+    linetype_scale: f32,
 }
 
 fn pt(p: &Point) -> V2 {

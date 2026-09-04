@@ -173,6 +173,7 @@ mod tests {
             color: Rgb::WHITE,
             lineweight: None,
             linetype: 0,
+            linetype_scale: 1.0,
             closed: false,
             bbox: b,
             source: CurveSource::None,
