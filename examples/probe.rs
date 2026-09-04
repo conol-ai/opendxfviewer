@@ -7,7 +7,11 @@ fn main() {
         match Drawing::load_file(&f) {
             Ok(d) => {
                 let n = d.entities().count();
-                println!("{f}: {n} entities, {} blocks, {} layers", d.blocks().count(), d.layers().count());
+                println!(
+                    "{f}: {n} entities, {} blocks, {} layers",
+                    d.blocks().count(),
+                    d.layers().count()
+                );
                 for e in d.entities().take(40) {
                     println!("  [{}] {:?}", e.common.layer, EntityKind(&e.specific));
                 }

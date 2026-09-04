@@ -58,7 +58,7 @@ impl Camera {
         let before = self.screen_to_world(anchor);
         self.scale = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
         let after = self.screen_to_world(anchor);
-        self.center = self.center + (before - after);
+        self.center += before - after;
     }
 
     /// Frame `b` in the viewport. An empty or degenerate box still yields a usable view.
@@ -80,7 +80,8 @@ impl Camera {
         let sx = if s.x > 0.0 { usable.x / s.x } else { f64::INFINITY };
         let sy = if s.y > 0.0 { usable.y / s.y } else { f64::INFINITY };
         let fit = sx.min(sy);
-        self.scale = if fit.is_finite() && fit > 0.0 { fit.clamp(MIN_SCALE, MAX_SCALE) } else { 1.0 };
+        self.scale =
+            if fit.is_finite() && fit > 0.0 { fit.clamp(MIN_SCALE, MAX_SCALE) } else { 1.0 };
     }
 
     /// Keep the world point at the viewport centre fixed when the widget is resized.

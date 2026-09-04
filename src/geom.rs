@@ -129,11 +129,7 @@ impl V3 {
         self.x * o.x + self.y * o.y + self.z * o.z
     }
     pub fn cross(self, o: V3) -> V3 {
-        v3(
-            self.y * o.z - self.z * o.y,
-            self.z * o.x - self.x * o.z,
-            self.x * o.y - self.y * o.x,
-        )
+        v3(self.y * o.z - self.z * o.y, self.z * o.x - self.x * o.z, self.x * o.y - self.y * o.x)
     }
     pub fn len(self) -> f64 {
         self.dot(self).sqrt()
@@ -216,11 +212,7 @@ impl Xform {
 
     /// `self ∘ rhs` — applies `rhs` first, then `self`.
     pub fn then(&self, outer: &Xform) -> Xform {
-        Xform {
-            a: outer.apply_dir(self.a),
-            b: outer.apply_dir(self.b),
-            c: outer.apply(self.c),
-        }
+        Xform { a: outer.apply_dir(self.a), b: outer.apply_dir(self.b), c: outer.apply(self.c) }
     }
 
     pub fn det(&self) -> f64 {
@@ -256,8 +248,10 @@ impl Default for Aabb {
 }
 
 impl Aabb {
-    pub const EMPTY: Aabb =
-        Aabb { min: v2(f64::INFINITY, f64::INFINITY), max: v2(f64::NEG_INFINITY, f64::NEG_INFINITY) };
+    pub const EMPTY: Aabb = Aabb {
+        min: v2(f64::INFINITY, f64::INFINITY),
+        max: v2(f64::NEG_INFINITY, f64::NEG_INFINITY),
+    };
 
     pub fn new(min: V2, max: V2) -> Aabb {
         Aabb { min, max }
@@ -335,7 +329,7 @@ impl FromIterator<V2> for Aabb {
 ///
 /// The renderer relies on this: emitting an oriented quad per segment is only cheap if segments
 /// that stretch far outside the viewport are trimmed to it first.
-pub fn clip_segment(mut p0: V2, mut p1: V2, r: &Aabb) -> Option<(V2, V2)> {
+pub fn clip_segment(p0: V2, p1: V2, r: &Aabb) -> Option<(V2, V2)> {
     if r.is_empty() {
         return None;
     }
@@ -369,10 +363,7 @@ pub fn clip_segment(mut p0: V2, mut p1: V2, r: &Aabb) -> Option<(V2, V2)> {
     if t0 > t1 {
         return None;
     }
-    let (a, b) = (p0 + d * t0, p0 + d * t1);
-    p0 = a;
-    p1 = b;
-    Some((p0, p1))
+    Some((p0 + d * t0, p0 + d * t1))
 }
 
 #[cfg(test)]

@@ -20,4 +20,5 @@ pub mod canvas;
 pub mod convert;
 pub mod geom;
 pub mod scene;
+pub mod spatial;
 pub mod tessellate;

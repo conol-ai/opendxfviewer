@@ -243,7 +243,10 @@ impl Scene {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.polys.is_empty() && self.dots.is_empty() && self.tris.is_empty() && self.texts.is_empty()
+        self.polys.is_empty()
+            && self.dots.is_empty()
+            && self.tris.is_empty()
+            && self.texts.is_empty()
     }
 
     /// Rebuild [`Scene::bounds`] from the primitives that are currently on a visible layer.
