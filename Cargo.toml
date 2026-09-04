@@ -2,7 +2,7 @@
 name = "opendxfviewer"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.79"
+rust-version = "1.82"
 description = "A fast, open source DXF (CAD drawing) viewer built with Rust and Makepad"
 repository = "https://github.com/tonyhuang/opendxfviewer"
 license = "MIT"

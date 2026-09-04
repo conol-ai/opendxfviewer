@@ -2,6 +2,7 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+
+# Perf fixtures — regenerate with `python3 tools/gen_fixtures.py --all`
 /tests/fixtures/large.dxf
-/samples/*.dxf
-!/tests/fixtures/*.dxf
+/tests/fixtures/huge.dxf

@@ -421,8 +421,12 @@ if __name__ == "__main__":
         (OUT / name).write_text(txt)
         print(f"{name:16} {len(txt):>10,} bytes")
     import sys
-    if "--large" in sys.argv:
-        big = OUT / "large.dxf"
-        txt = f_large().render()
-        big.write_text(txt)
+    # Perf fixtures are git-ignored: generate them on demand, they are large.
+    if "--large" in sys.argv or "--all" in sys.argv:
+        txt = f_large(140).render()          # ~23k entities, 1.8 MB
+        (OUT / "large.dxf").write_text(txt)
         print(f"{'large.dxf':16} {len(txt):>10,} bytes")
+    if "--huge" in sys.argv or "--all" in sys.argv:
+        txt = f_large(380).render()          # ~169k entities, 14 MB
+        (OUT / "huge.dxf").write_text(txt)
+        print(f"{'huge.dxf':16} {len(txt):>10,} bytes")
