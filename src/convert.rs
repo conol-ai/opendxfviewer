@@ -221,7 +221,7 @@ impl<'a> Ctx<'a> {
 
     // -- resolution helpers ---------------------------------------------------------------
 
-    fn layer_of(&mut self, e: &Entity, inh: &Inherit) -> u16 {
+    fn layer_of(&mut self, e: &'a Entity, inh: &Inherit) -> u16 {
         let name = e.common.layer.as_str();
         // Inside a block, layer "0" means "whatever layer the INSERT was on".
         if inh.depth > 0 && name == "0" {
@@ -229,7 +229,9 @@ impl<'a> Ctx<'a> {
         }
         match self.layer_ids.get(name) {
             Some(&id) => id,
-            // A file may reference a layer it never defined in the table.
+            // A file may reference a layer it never defined in the table. Record it, so a
+            // drawing with a thousand entities on one undefined layer produces one layer and not
+            // a thousand — which is why `emit` takes `&'a Entity` rather than a short borrow.
             None => {
                 let fg = if self.opts.dark_background { Rgb::WHITE } else { Rgb::BLACK };
                 let id = self.scene.layers.len() as u16;
@@ -242,8 +244,7 @@ impl<'a> Ctx<'a> {
                     linetype: 0,
                     count: 0,
                 });
-                // Safety: `self.dr` outlives `self`, but `name` borrows `e`, which does not. Keying
-                // by an owned string is not possible with a `&'a str` map, so re-look-up next time.
+                self.layer_ids.insert(name, id);
                 id
             }
         }
@@ -274,7 +275,7 @@ impl<'a> Ctx<'a> {
         *self.linetype_ids.get(n).unwrap_or(&0)
     }
 
-    fn style(&mut self, e: &Entity, inh: &Inherit) -> Style {
+    fn style(&mut self, e: &'a Entity, inh: &Inherit) -> Style {
         let layer = self.layer_of(e, inh);
         Style {
             layer,
@@ -354,7 +355,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn emit(&mut self, e: &Entity, inh: &Inherit) {
+    fn emit(&mut self, e: &'a Entity, inh: &Inherit) {
         if self.full() {
             self.truncated = true;
             return;
@@ -747,7 +748,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn insert(&mut self, i: &dxf::entities::Insert, _e: &Entity, inh: &Inherit, st: Style) {
+    fn insert(&mut self, i: &'a dxf::entities::Insert, _e: &'a Entity, inh: &Inherit, st: Style) {
         if inh.depth >= self.opts.max_block_depth {
             self.warn(format!(
                 "Stopped expanding blocks at {} levels deep (near \"{}\").",
@@ -1597,6 +1598,30 @@ mod tests {
     fn a_zero_scale_insert_draws_nothing() {
         let s = load("malformed.dxf");
         assert!(s.polys.iter().all(|p| p.bbox.center().dist(v2(0.0, 40.0)) > 1.0));
+    }
+
+    #[test]
+    fn an_undefined_layer_is_registered_once_not_once_per_entity() {
+        // The dxf crate happens to backfill referenced-but-undefined layers into the table, so
+        // this exercises the fallback directly: a layer name that reaches layer_of without ever
+        // having been in layer_ids must produce exactly one Layer however many entities use it.
+        let dr =
+            crate::read::load(format!("{}/tests/fixtures/basic.dxf", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let mut c = Ctx::new(&dr, Options::default());
+        c.layer_ids.clear();
+        let ents: Vec<&Entity> = dr.entities().collect();
+        let before = c.scene.layers.len();
+        let root = Inherit::root(0, Rgb::WHITE);
+        let ids: Vec<u16> = ents.iter().map(|e| c.layer_of(e, &root)).collect();
+        // basic.dxf uses four distinct layer names.
+        assert_eq!(c.scene.layers.len(), before + 4, "one Layer per distinct name, not per entity");
+        // Every entity on the same layer name must land on the same id.
+        for (a, b) in ents.iter().zip(&ids) {
+            let again = c.layer_of(a, &root);
+            assert_eq!(again, *b, "layer id for {:?} was not stable", a.common.layer);
+        }
+        assert_eq!(c.scene.layers.len(), before + 4, "a second pass must not add more layers");
     }
 
     #[test]

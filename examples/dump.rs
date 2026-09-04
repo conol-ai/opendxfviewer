@@ -46,8 +46,8 @@ fn main() {
             );
         }
         println!(
-            "  stats: read={} drawn={} unsupported={:?}",
-            s.stats.entities_read, s.stats.entities_drawn, s.stats.unsupported
+            "  stats: read={} primitives={} unsupported={:?}",
+            s.stats.entities_read, s.stats.primitives, s.stats.unsupported
         );
         for w in &s.stats.warnings {
             println!("  warn: {w}");
