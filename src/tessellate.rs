@@ -466,6 +466,25 @@ pub fn flatten_circle(center: V2, radius: f64, tol: Tol, out: &mut Vec<V2>) {
     }
 }
 
+/// Wrap an angle into `(0, TAU]`, treating a whole number of turns as a full turn.
+///
+/// Modular rather than a loop: a DXF file can carry an angle of 1e300 or an infinity, and
+/// subtracting TAU until it fits would never finish. A viewer that hangs on a malformed file is
+/// worse than one that draws it oddly.
+fn wrap_sweep(sweep: f64) -> f64 {
+    use std::f64::consts::TAU;
+    if !sweep.is_finite() {
+        return TAU;
+    }
+    let w = sweep.rem_euclid(TAU);
+    // rem_euclid maps an exact multiple of TAU to 0, which for an arc means a full turn.
+    if w <= 0.0 {
+        TAU
+    } else {
+        w
+    }
+}
+
 /// Normalise a DXF arc's degree-based start/end angles into `(start_radians, signed_sweep)`.
 ///
 /// DXF arcs always sweep counter-clockwise from start to end, so an end angle below the start wraps
@@ -473,30 +492,23 @@ pub fn flatten_circle(center: V2, radius: f64, tol: Tol, out: &mut Vec<V2>) {
 pub fn arc_sweep_from_degrees(start_deg: f64, end_deg: f64) -> (f64, f64) {
     let start = start_deg.to_radians();
     let end = end_deg.to_radians();
-    let mut sweep = end - start;
-    while sweep <= 0.0 {
-        sweep += std::f64::consts::TAU;
+    if !start.is_finite() {
+        return (0.0, std::f64::consts::TAU);
     }
-    while sweep > std::f64::consts::TAU {
-        sweep -= std::f64::consts::TAU;
-    }
-    (start, sweep)
+    (start, wrap_sweep(end - start))
 }
 
 /// Normalise a DXF ellipse's start/end parameters into `(start, signed_sweep)`.
 pub fn ellipse_sweep(start: f64, end: f64) -> (f64, f64) {
-    let mut sweep = end - start;
+    if !start.is_finite() {
+        return (0.0, std::f64::consts::TAU);
+    }
+    let sweep = end - start;
     // A full ellipse is stored as 0..2pi; anything that comes back as no sweep at all is one too.
     if sweep.abs() < 1e-12 {
         return (start, std::f64::consts::TAU);
     }
-    while sweep < 0.0 {
-        sweep += std::f64::consts::TAU;
-    }
-    while sweep > std::f64::consts::TAU {
-        sweep -= std::f64::consts::TAU;
-    }
-    (start, sweep)
+    (start, wrap_sweep(sweep))
 }
 
 #[cfg(test)]
@@ -658,6 +670,44 @@ mod tests {
         // Equal angles mean a full circle.
         let (_, w) = arc_sweep_from_degrees(45.0, 45.0);
         assert!((w - TAU).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_nonsense_angle_cannot_hang_the_normalisers() {
+        // Subtracting TAU until an infinity fits would never finish. Every one of these must
+        // return promptly with a usable sweep.
+        for (s, e) in [
+            (0.0, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (f64::NEG_INFINITY, 0.0),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::MAX, f64::MIN),
+            (f64::NAN, 90.0),
+            (0.0, f64::NAN),
+            (0.0, 1e308),
+            (-1e308, 1e308),
+        ] {
+            let (start, sweep) = arc_sweep_from_degrees(s, e);
+            assert!(start.is_finite(), "({s}, {e}) -> start {start}");
+            assert!(
+                sweep.is_finite() && sweep > 0.0 && sweep <= TAU + 1e-12,
+                "({s}, {e}) -> {sweep}"
+            );
+            let (start, sweep) = ellipse_sweep(s, e);
+            assert!(start.is_finite(), "({s}, {e}) -> start {start}");
+            assert!(
+                sweep.is_finite() && sweep > 0.0 && sweep <= TAU + 1e-12,
+                "({s}, {e}) -> {sweep}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sweep_of_several_whole_turns_is_one_turn() {
+        let (_, w) = arc_sweep_from_degrees(0.0, 720.0);
+        assert!((w - TAU).abs() < 1e-9, "{w}");
+        let (_, w) = arc_sweep_from_degrees(0.0, 450.0);
+        assert!((w - FRAC_PI_2).abs() < 1e-9, "{w}");
     }
 
     #[test]

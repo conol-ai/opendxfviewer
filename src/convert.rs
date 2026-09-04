@@ -84,11 +84,13 @@ impl Inherit {
 struct Ctx<'a> {
     dr: &'a Drawing,
     opts: Options,
-    blocks: HashMap<&'a str, &'a Block>,
-    layer_ids: HashMap<&'a str, u16>,
-    linetype_ids: HashMap<&'a str, u16>,
+    blocks: HashMap<String, &'a Block>,
+    /// Keyed by upper-cased name: DXF table names are case-insensitive, so an entity on "Walls"
+    /// and one on "WALLS" belong to the same layer.
+    layer_ids: HashMap<String, u16>,
+    linetype_ids: HashMap<String, u16>,
     /// Blocks currently being expanded, so a self-referential drawing cannot loop forever.
-    active: HashSet<&'a str>,
+    active: HashSet<String>,
     scene: Scene,
     unsupported: BTreeMap<&'static str, usize>,
     warned_missing: HashSet<String>,
@@ -108,9 +110,10 @@ impl<'a> Ctx<'a> {
         // Linetypes first: layers reference them by name.
         let mut linetype_ids = HashMap::new();
         scene.linetypes.push(Linetype { name: "CONTINUOUS".into(), ..Linetype::default() });
-        linetype_ids.insert("CONTINUOUS", 0u16);
+        linetype_ids.insert("CONTINUOUS".to_string(), 0u16);
         for lt in dr.line_types() {
-            if linetype_ids.contains_key(lt.name.as_str()) {
+            let key = lt.name.to_uppercase();
+            if linetype_ids.contains_key(&key) {
                 continue;
             }
             let pattern: Vec<f64> =
@@ -122,7 +125,7 @@ impl<'a> Ctx<'a> {
             };
             let id = scene.linetypes.len() as u16;
             scene.linetypes.push(Linetype { name: lt.name.clone(), pattern, total });
-            linetype_ids.insert(lt.name.as_str(), id);
+            linetype_ids.insert(key, id);
         }
 
         let fg = if opts.dark_background { Rgb::WHITE } else { Rgb::BLACK };
@@ -137,7 +140,7 @@ impl<'a> Ctx<'a> {
             linetype: 0,
             count: 0,
         });
-        layer_ids.insert("0", 0u16);
+        layer_ids.insert("0".to_string(), 0u16);
         for l in dr.layers() {
             let color = match l.color.index() {
                 Some(i) => aci::rgb(i as i16, opts.dark_background),
@@ -146,8 +149,9 @@ impl<'a> Ctx<'a> {
                 None => fg,
             };
             let lineweight = lw(l.line_weight.raw_value());
-            let linetype = *linetype_ids.get(l.line_type_name.as_str()).unwrap_or(&0);
-            if let Some(&id) = layer_ids.get(l.name.as_str()) {
+            let linetype = *linetype_ids.get(&l.line_type_name.to_uppercase()).unwrap_or(&0);
+            let key = l.name.to_uppercase();
+            if let Some(&id) = layer_ids.get(&key) {
                 let e = &mut scene.layers[id as usize];
                 e.color = color;
                 e.visible_in_file = l.is_layer_on;
@@ -165,13 +169,13 @@ impl<'a> Ctx<'a> {
                 linetype,
                 count: 0,
             });
-            layer_ids.insert(l.name.as_str(), id);
+            layer_ids.insert(key, id);
         }
 
         Ctx {
             dr,
             opts,
-            blocks: dr.blocks().map(|b| (b.name.as_str(), b)).collect(),
+            blocks: dr.blocks().map(|b| (b.name.to_uppercase(), b)).collect(),
             layer_ids,
             linetype_ids,
             active: HashSet::new(),
@@ -209,7 +213,9 @@ impl<'a> Ctx<'a> {
         }
         let mut b = Aabb::EMPTY;
         for p in &self.scene.polys {
-            b = b.union(&p.bbox);
+            if !p.unbounded {
+                b = b.union(&p.bbox);
+            }
         }
         for d in &self.scene.dots {
             b.add_point(d.pos);
@@ -233,7 +239,7 @@ impl<'a> Ctx<'a> {
         if inh.depth > 0 && name == "0" {
             return inh.layer;
         }
-        match self.layer_ids.get(name) {
+        match self.layer_ids.get(&name.to_uppercase()) {
             Some(&id) => id,
             // A file may reference a layer it never defined in the table. Record it, so a
             // drawing with a thousand entities on one undefined layer produces one layer and not
@@ -250,7 +256,7 @@ impl<'a> Ctx<'a> {
                     linetype: 0,
                     count: 0,
                 });
-                self.layer_ids.insert(name, id);
+                self.layer_ids.insert(name.to_uppercase(), id);
                 id
             }
         }
@@ -278,7 +284,7 @@ impl<'a> Ctx<'a> {
         if n.is_empty() || n.eq_ignore_ascii_case("BYLAYER") || n.eq_ignore_ascii_case("BYBLOCK") {
             return self.scene.layers.get(layer as usize).map(|l| l.linetype).unwrap_or(0);
         }
-        *self.linetype_ids.get(n).unwrap_or(&0)
+        *self.linetype_ids.get(&n.to_uppercase()).unwrap_or(&0)
     }
 
     fn style(&mut self, e: &'a Entity, inh: &Inherit) -> Style {
@@ -324,10 +330,20 @@ impl<'a> Ctx<'a> {
             linetype: st.linetype,
             linetype_scale: st.linetype_scale,
             closed,
+            unbounded: false,
             bbox,
             source,
         });
         self.bump(st.layer);
+    }
+
+    /// A construction line: drawn, but kept out of the drawing's extent.
+    fn push_unbounded(&mut self, pts: Vec<V2>, st: Style) {
+        let before = self.scene.polys.len();
+        self.push_poly(pts, false, st, CurveSource::None);
+        if let Some(p) = self.scene.polys.get_mut(before) {
+            p.unbounded = true;
+        }
     }
 
     fn push_dot(&mut self, p: V2, st: Style) {
@@ -383,12 +399,12 @@ impl<'a> Ctx<'a> {
             }
 
             EntityType::Circle(c) => {
-                let x = ocs(&c.normal, e.common.elevation).then(&inh.xform);
+                let x = ocs(&c.normal, e.common.elevation + c.center.z).then(&inh.xform);
                 self.arc_like(pt(&c.center), c.radius, 0.0, std::f64::consts::TAU, &x, true, st, q);
             }
 
             EntityType::Arc(a) => {
-                let x = ocs(&a.normal, e.common.elevation).then(&inh.xform);
+                let x = ocs(&a.normal, e.common.elevation + a.center.z).then(&inh.xform);
                 let (s, sweep) = tess::arc_sweep_from_degrees(a.start_angle, a.end_angle);
                 self.arc_like(pt(&a.center), a.radius, s, sweep, &x, false, st, q);
             }
@@ -424,10 +440,9 @@ impl<'a> Ctx<'a> {
 
             EntityType::Spline(s) => self.spline(s, inh, st, q),
 
-            EntityType::ModelPoint(p) => {
-                let x = ocs(&p.extrusion_direction, e.common.elevation).then(&inh.xform);
-                self.push_dot(x.apply(pt(&p.location)), st);
-            }
+            // POINT carries an extrusion vector, but only to orient the marker glyph: its
+            // location is in WCS, not in the plane the extrusion defines.
+            EntityType::ModelPoint(p) => self.push_dot(inh.xform.apply(pt3(&p.location)), st),
 
             EntityType::Insert(i) => self.insert(i, e, inh, st),
 
@@ -468,49 +483,15 @@ impl<'a> Ctx<'a> {
 
             EntityType::Text(t) => {
                 let x = ocs(&t.normal, e.common.elevation).then(&inh.xform);
-                let anchor = text_anchor(
-                    &t.location,
-                    &t.second_alignment_point,
-                    t.horizontal_text_justification,
-                    t.vertical_text_justification,
-                );
-                self.text(
-                    &t.value,
-                    x.apply(anchor),
-                    t.text_height,
-                    t.rotation.to_radians(),
-                    t.relative_x_scale_factor,
-                    t.oblique_angle.to_radians(),
-                    halign(t.horizontal_text_justification),
-                    valign(t.vertical_text_justification),
-                    &x,
-                    st,
-                );
+                self.text_entity(&TextRun::from_text(t), &x, st);
             }
 
-            EntityType::Attribute(t) => {
-                if t.is_invisible() {
+            EntityType::Attribute(a) => {
+                if a.is_invisible() {
                     return;
                 }
-                let x = ocs(&t.normal, e.common.elevation).then(&inh.xform);
-                let anchor = text_anchor(
-                    &t.location,
-                    &t.second_alignment_point,
-                    t.horizontal_text_justification,
-                    t.vertical_text_justification,
-                );
-                self.text(
-                    &t.value,
-                    x.apply(anchor),
-                    t.text_height,
-                    t.rotation.to_radians(),
-                    t.relative_x_scale_factor,
-                    t.oblique_angle.to_radians(),
-                    halign(t.horizontal_text_justification),
-                    valign(t.vertical_text_justification),
-                    &x,
-                    st,
-                );
+                let x = ocs(&a.normal, e.common.elevation).then(&inh.xform);
+                self.text_entity(&TextRun::from_attribute(a), &x, st);
             }
 
             // An ATTDEF is a placeholder in a block definition; drawing its prompt text in model
@@ -540,17 +521,12 @@ impl<'a> Ctx<'a> {
             EntityType::Ray(r) => {
                 let o = inh.xform.apply(pt3(&r.start_point));
                 let d = inh.xform.apply_dir(vec3(&r.unit_direction_vector).xy()).norm();
-                self.push_poly(vec![o, o + d * RAY_LENGTH], false, st, CurveSource::None);
+                self.push_unbounded(vec![o, o + d * RAY_LENGTH], st);
             }
             EntityType::XLine(r) => {
                 let o = inh.xform.apply(pt3(&r.first_point));
                 let d = inh.xform.apply_dir(vec3(&r.unit_direction_vector).xy()).norm();
-                self.push_poly(
-                    vec![o - d * RAY_LENGTH, o + d * RAY_LENGTH],
-                    false,
-                    st,
-                    CurveSource::None,
-                );
+                self.push_unbounded(vec![o - d * RAY_LENGTH, o + d * RAY_LENGTH], st);
             }
 
             // Dimensions carry a pre-rendered anonymous block holding the lines, arrows and text
@@ -607,20 +583,20 @@ impl<'a> Ctx<'a> {
         let v = x.apply_dir(v2(0.0, radius));
         if x.is_conformal() {
             let r = u.len();
+            // The image of the point at angle t is `c + u*cos t + v*sin t`. For a rotation that
+            // is angle `rot + t`; for a mirror it is `rot - t`, with the sweep reversed to match.
+            // Getting this backwards puts a mirrored arc on the opposite side of its circle.
             let rot = u.angle();
-            let src = CurveSource::Arc {
-                center: c,
-                radius: r,
-                start: start + rot,
-                sweep: if x.is_mirrored() { -sweep } else { sweep },
-            };
+            let (s2, w2) =
+                if x.is_mirrored() { (rot - start, -sweep) } else { (rot + start, sweep) };
             let mut out = Vec::new();
-            let (s2, w2) = match src {
-                CurveSource::Arc { start, sweep, .. } => (start, sweep),
-                _ => unreachable!(),
-            };
             tess::flatten_arc(c, r, s2, w2, Tol::new(r * q), &mut out);
-            self.push_poly(out, closed, st, src);
+            self.push_poly(
+                out,
+                closed,
+                st,
+                CurveSource::Arc { center: c, radius: r, start: s2, sweep: w2 },
+            );
         } else {
             self.ellipse_like(c, u, v, start, sweep, st, q, closed);
         }
@@ -743,7 +719,7 @@ impl<'a> Ctx<'a> {
             self.note_partial("DIMENSION without a geometry block");
             return;
         }
-        let Some(&block) = self.blocks.get(block_name) else {
+        let Some(&block) = self.blocks.get(&block_name.to_uppercase()) else {
             self.note_partial("DIMENSION without a geometry block");
             return;
         };
@@ -765,13 +741,13 @@ impl<'a> Ctx<'a> {
             ));
             return;
         }
-        let Some(&block) = self.blocks.get(i.name.as_str()) else {
+        let Some(&block) = self.blocks.get(&i.name.to_uppercase()) else {
             self.warn(format!("Block \"{}\" is referenced but not defined in the file.", i.name));
             return;
         };
         // A block that contains itself, directly or through a chain, would expand forever.
-        let name: &'a str = block.name.as_str();
-        if !self.active.insert(name) {
+        let name = block.name.to_uppercase();
+        if !self.active.insert(name.clone()) {
             self.warn(format!("Block \"{}\" refers to itself; stopped expanding it.", i.name));
             return;
         }
@@ -786,7 +762,7 @@ impl<'a> Ctx<'a> {
         // inserts, and treating it as 1 would draw geometry AutoCAD does not.
         let s = v2(i.x_scale_factor, i.y_scale_factor);
         if !s.is_finite() || s.x == 0.0 || s.y == 0.0 {
-            self.active.remove(name);
+            self.active.remove(&name);
             return;
         }
         let rot = i.rotation.to_radians();
@@ -821,7 +797,37 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        self.active.remove(name);
+        self.active.remove(&name);
+
+        // The ATTRIBs written after an INSERT are folded into it by the parser and never appear
+        // in the entity stream, so they have to be drawn from here or they are lost entirely —
+        // and they carry the text that identifies the part. Their coordinates are already in
+        // world space, so they use the parent frame rather than the block's.
+        for a in i.attributes() {
+            if a.is_invisible() || a.value.trim().is_empty() {
+                continue;
+            }
+            let x = ocs(&a.normal, 0.0).then(&inh.xform);
+            self.text_entity(&TextRun::from_attribute(a), &x, st);
+        }
+    }
+
+    /// Draw one TEXT-shaped entity: TEXT, ATTRIB, and the attributes carried by an INSERT all
+    /// share the same fields and the same placement rules.
+    fn text_entity(&mut self, r: &TextRun<'_>, x: &Xform, st: Style) {
+        let anchor = text_anchor(r.location, r.second, r.halign, r.valign);
+        self.text(
+            &decode_control_codes(r.value),
+            x.apply(anchor),
+            r.height,
+            r.rotation.to_radians(),
+            r.width_factor,
+            r.oblique.to_radians(),
+            halign(r.halign),
+            valign_for(r.halign, r.valign),
+            x,
+            st,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -869,7 +875,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn mtext(&mut self, m: &dxf::entities::MText, inh: &Inherit, st: Style) {
-        let x = ocs(&m.extrusion_direction, 0.0).then(&inh.xform);
+        // Like ELLIPSE, MTEXT stores its insertion point in WCS despite having an extrusion.
+        let x = inh.xform;
         // Long MTEXT is split across group 3 chunks with group 1 holding the tail.
         let mut raw = m.extended_text.join("");
         raw.push_str(&m.text);
@@ -909,6 +916,49 @@ const MTEXT_LINE_SPACING: f64 = 1.6;
 /// Rough advance width of a glyph relative to the cap height, used only for bounding boxes.
 const GLYPH_ADVANCE: f64 = 0.6;
 
+/// The fields TEXT, ATTRIB and an INSERT's attributes have in common.
+struct TextRun<'a> {
+    value: &'a str,
+    location: &'a Point,
+    second: &'a Point,
+    height: f64,
+    rotation: f64,
+    width_factor: f64,
+    oblique: f64,
+    halign: HorizontalTextJustification,
+    valign: VerticalTextJustification,
+}
+
+impl<'a> TextRun<'a> {
+    fn from_text(t: &'a dxf::entities::Text) -> TextRun<'a> {
+        TextRun {
+            value: &t.value,
+            location: &t.location,
+            second: &t.second_alignment_point,
+            height: t.text_height,
+            rotation: t.rotation,
+            width_factor: t.relative_x_scale_factor,
+            oblique: t.oblique_angle,
+            halign: t.horizontal_text_justification,
+            valign: t.vertical_text_justification,
+        }
+    }
+
+    fn from_attribute(a: &'a dxf::entities::Attribute) -> TextRun<'a> {
+        TextRun {
+            value: &a.value,
+            location: &a.location,
+            second: &a.second_alignment_point,
+            height: a.text_height,
+            rotation: a.rotation,
+            width_factor: a.relative_x_scale_factor,
+            oblique: a.oblique_angle,
+            halign: a.horizontal_text_justification,
+            valign: a.vertical_text_justification,
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 struct Style {
     layer: u16,
@@ -928,9 +978,14 @@ fn vec3(v: &Vector) -> V3 {
     v3(v.x, v.y, v.z)
 }
 
+/// A DXF lineweight in hundredths of a millimetre, or `None` when it is not specified.
+///
+/// -1 is ByBlock, -2 ByLayer, -3 the drawing default. Zero is nominally a real 0.00 mm weight,
+/// but the parser defaults an absent group 370 to zero as well, so the two are indistinguishable
+/// — and treating it as unset is what allows a layer's own weight to apply at all. A 0.00 mm line
+/// renders as a hairline either way.
 fn lw(raw: i16) -> Option<i16> {
-    // -1 ByBlock, -2 ByLayer, -3 default.
-    if raw >= 0 {
+    if raw > 0 {
         Some(raw)
     } else {
         None
@@ -996,10 +1051,67 @@ fn halign(h: HorizontalTextJustification) -> HAlign {
         H::Left => HAlign::Left,
         H::Center | H::Middle => HAlign::Center,
         H::Right => HAlign::Right,
-        // Aligned and Fit stretch between two points; treating them as left-anchored keeps the
-        // start of the run in the right place.
+        // Aligned and Fit stretch the run between two points. We do not stretch, so anchoring at
+        // the first of the two keeps the start of the text where the author put it.
         _ => HAlign::Left,
     }
+}
+
+/// Vertical alignment, accounting for the one horizontal code that also sets it.
+///
+/// `Middle` (group 72 = 4) is not "centre horizontally": it centres the text on the alignment
+/// point in *both* directions, whatever group 73 says. Treating it as a horizontal-only code
+/// drops the run half a line below where AutoCAD puts it.
+fn valign_for(h: HorizontalTextJustification, v: VerticalTextJustification) -> VAlign {
+    if matches!(h, HorizontalTextJustification::Middle) {
+        return VAlign::Middle;
+    }
+    valign(v)
+}
+
+/// Decode the `%%` control codes DXF uses for characters its text encoding cannot carry.
+///
+/// `%%c` is the diameter sign and appears on almost every mechanical drawing; without this a
+/// bore callout reads "%%c44" instead of "Ø44". Overscore and underscore toggles carry no glyph,
+/// so they are simply removed.
+pub fn decode_control_codes(s: &str) -> String {
+    if !s.contains("%%") {
+        return s.to_string();
+    }
+    let b: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == '%' && i + 2 < b.len() && b[i + 1] == '%' {
+            let (skip, ch) = match b[i + 2] {
+                'd' | 'D' => (3, Some('°')),
+                'c' | 'C' => (3, Some('\u{2300}')),
+                'p' | 'P' => (3, Some('±')),
+                '%' => (3, Some('%')),
+                // %%o and %%u toggle overscore and underscore, which have no glyph of their own.
+                'o' | 'O' | 'u' | 'U' | 'k' | 'K' => (3, None),
+                // %%nnn is a three-digit character code.
+                c if c.is_ascii_digit() => {
+                    let mut n = 0u32;
+                    let mut k = 0;
+                    while k < 3 && i + 2 + k < b.len() && b[i + 2 + k].is_ascii_digit() {
+                        n = n * 10 + b[i + 2 + k].to_digit(10).unwrap();
+                        k += 1;
+                    }
+                    (2 + k, char::from_u32(n))
+                }
+                _ => (2, None),
+            };
+            if let Some(c) = ch {
+                out.push(c);
+            }
+            i += skip;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
 }
 
 fn valign(v: VerticalTextJustification) -> VAlign {
@@ -1069,8 +1181,21 @@ pub fn mtext_lines(raw: &str) -> Vec<String> {
                         }
                     }
                 }
-                // Single-character toggles: underline, overline, strikethrough, stacking.
-                Some('L' | 'l' | 'O' | 'o' | 'K' | 'k' | 'S') => {}
+                // \S is a stacked fraction: "\S numerator ^ denominator ;". Treating it as a
+                // single-character toggle leaves the parts and the terminating semicolon in the
+                // text, so it runs to the semicolon like the other lettered codes. The numerator
+                // and denominator are kept, separated by a slash.
+                Some('S') => {
+                    for n in it.by_ref() {
+                        match n {
+                            ';' => break,
+                            '^' | '#' => lines.last_mut().unwrap().push('/'),
+                            other => lines.last_mut().unwrap().push(other),
+                        }
+                    }
+                }
+                // Single-character toggles: underline, overline, strikethrough.
+                Some('L' | 'l' | 'O' | 'o' | 'K' | 'k') => {}
                 Some(other) => lines.last_mut().unwrap().push(other),
                 None => {}
             },
@@ -1084,7 +1209,7 @@ pub fn mtext_lines(raw: &str) -> Vec<String> {
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
-    lines
+    lines.iter().map(|l| decode_control_codes(l)).collect()
 }
 
 /// A conservative bounding box for a text run.
@@ -1536,6 +1661,38 @@ mod tests {
     }
 
     #[test]
+    fn control_codes_become_the_characters_they_stand_for() {
+        assert_eq!(decode_control_codes("%%c44 H7"), "\u{2300}44 H7");
+        assert_eq!(decode_control_codes("45%%d"), "45°");
+        assert_eq!(decode_control_codes("%%p0.1"), "±0.1");
+        assert_eq!(decode_control_codes("100%%%"), "100%");
+        assert_eq!(decode_control_codes("%%uunderlined%%u"), "underlined");
+        assert_eq!(decode_control_codes("%%C%%D%%P"), "\u{2300}°±");
+        // A three-digit character code.
+        assert_eq!(decode_control_codes("%%176"), "°");
+        // Plain text is untouched, and a stray %% at the end does not panic or eat characters.
+        assert_eq!(decode_control_codes("no codes here"), "no codes here");
+        assert_eq!(decode_control_codes("trailing%%"), "trailing%%");
+        assert_eq!(decode_control_codes("%%"), "%%");
+        assert_eq!(decode_control_codes(""), "");
+        // Multi-byte input must not be split mid-character.
+        assert_eq!(decode_control_codes("図%%c面"), "図\u{2300}面");
+    }
+
+    #[test]
+    fn middle_justification_centres_vertically_as_well() {
+        use HorizontalTextJustification as H;
+        use VerticalTextJustification as V;
+        // Group 72 = 4 means "middle", which centres in both directions whatever group 73 says.
+        assert_eq!(valign_for(H::Middle, V::Baseline), VAlign::Middle);
+        assert_eq!(valign_for(H::Middle, V::Top), VAlign::Middle);
+        // Every other horizontal code leaves the vertical one alone.
+        assert_eq!(valign_for(H::Center, V::Baseline), VAlign::Baseline);
+        assert_eq!(valign_for(H::Left, V::Top), VAlign::Top);
+        assert_eq!(valign_for(H::Right, V::Bottom), VAlign::Bottom);
+    }
+
+    #[test]
     fn mtext_formatting_codes_are_stripped() {
         assert_eq!(mtext_lines(r"plain"), ["plain"]);
         assert_eq!(mtext_lines(r"a\Pb\Pc"), ["a", "b", "c"]);
@@ -1547,6 +1704,11 @@ mod tests {
         assert_eq!(mtext_lines(r"a\\b"), [r"a\b"]);
         assert_eq!(mtext_lines(r"x\{y\}"), ["x{y}"]);
         assert_eq!(mtext_lines(r"\H2.5x;big"), ["big"]);
+        // A stacked fraction keeps both parts rather than leaking its terminator.
+        assert_eq!(mtext_lines(r"1\S+0.1^-0.2;"), ["1+0.1/-0.2"]);
+        assert_eq!(mtext_lines(r"\S1#2; nominal"), ["1/2 nominal"]);
+        // Control codes are decoded in MTEXT too.
+        assert_eq!(mtext_lines("%%c20"), ["\u{2300}20"]);
         assert!(mtext_lines("").is_empty());
         assert!(mtext_lines(r"\P\P").is_empty());
     }
@@ -1632,6 +1794,109 @@ mod tests {
             assert_eq!(again, *b, "layer id for {:?} was not stable", a.common.layer);
         }
         assert_eq!(c.scene.layers.len(), before + 4, "a second pass must not add more layers");
+    }
+
+    #[test]
+    fn a_mirrored_arc_lands_on_the_right_side_of_its_circle() {
+        // Under a -Z extrusion the OCS x axis is negated, so the image of OCS angle t is at
+        // (pi - t), not (pi + t). An arc starting at zero cannot tell those apart; this one
+        // starts at 45 degrees, where the two answers differ by 90.
+        let s = load("ocs_3d.dxf");
+        let p = s
+            .polys
+            .iter()
+            .find(|p| {
+                matches!(p.source, CurveSource::Arc { center, radius, .. }
+                if center.dist(v2(0.0, -40.0)) < 1e-9 && (radius - 20.0).abs() < 1e-9)
+            })
+            .expect("the mirrored arc");
+        let CurveSource::Arc { start, sweep, .. } = p.source else { unreachable!() };
+        // OCS 45..135 mirrors to WCS 135..45, i.e. it starts at 135 and sweeps backwards.
+        assert!(close(start, 135f64.to_radians()), "start {}", start.to_degrees());
+        assert!(close(sweep, -90f64.to_radians()), "sweep {}", sweep.to_degrees());
+        // Which puts it across the top of its circle, not down one side. The bbox is of the
+        // tessellated polyline, so it sits within the chord tolerance of the true arc.
+        let tol = 0.1;
+        assert!(
+            (p.bbox.min.y - (-40.0 + 20.0 * 45f64.to_radians().sin())).abs() < tol,
+            "{:?}",
+            p.bbox
+        );
+        assert!((p.bbox.max.y - (-20.0)).abs() < tol, "{:?}", p.bbox);
+        assert!(p.bbox.min.x < -14.0 && p.bbox.max.x > 14.0, "{:?}", p.bbox);
+    }
+
+    #[test]
+    fn the_one_sixty_fourth_threshold_switches_the_reference_axis() {
+        // Below the threshold the algorithm crosses with world Y, above it with world Z. An
+        // extrusion just either side of 1/64 must therefore give visibly different bases.
+        let below = ocs(&Vector::new(0.01, 0.0, 1.0), 0.0);
+        let above = ocs(&Vector::new(0.02, 0.0, 1.0), 0.0);
+        assert!(below.a.dist(above.a) > 0.5, "the two branches produced the same X axis");
+        // The below-threshold branch crosses world Y with a near-Z normal, giving an X axis that
+        // points roughly along world +X; the above-threshold branch gives roughly world +Y.
+        assert!(below.a.x.abs() > 0.9, "{:?}", below.a);
+        assert!(above.a.y.abs() > 0.9, "{:?}", above.a);
+    }
+
+    #[test]
+    fn attributes_written_after_an_insert_are_drawn() {
+        // The parser folds them into the INSERT, so they never reach the entity stream: reading
+        // them back out is the only way they get drawn at all.
+        let s = load("annotation.dxf");
+        let by = |t: &str| s.texts.iter().find(|x| x.text == t);
+        assert!(
+            by("PUMP-101").is_some(),
+            "{:?}",
+            s.texts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        // An attribute inherits the colour of the INSERT that carries it.
+        assert_eq!(by("PUMP-101").unwrap().color, aci::PALETTE[2]);
+        // Control codes are decoded in attribute values too.
+        assert!(by("\u{2300}50 BORE").is_some(), "control code not decoded in an attribute");
+        assert_eq!(by("\u{2300}50 BORE").unwrap().color, aci::PALETTE[3]);
+        // An attribute sits where the file puts it, in world space, not in block space.
+        assert!(by("PUMP-101").unwrap().pos.dist(v2(-8.0, -2.0)) < 1e-9);
+    }
+
+    #[test]
+    fn construction_lines_are_drawn_but_left_out_of_the_extent() {
+        let s = load("annotation.dxf");
+        // Both a RAY and an XLINE are present and enormous.
+        let far = s.polys.iter().filter(|p| p.unbounded).count();
+        assert_eq!(far, 2, "the RAY and XLINE should both be drawn");
+        assert!(s.polys.iter().any(|p| p.unbounded && p.bbox.size().x > 1e6));
+        // But the drawing's extent is the size of the actual parts, so Fit frames those.
+        assert!(
+            s.bounds.size().x < 200.0,
+            "an infinite line dragged out the extent: {:?}",
+            s.bounds
+        );
+        assert!(s.visible_bounds().size().x < 200.0, "{:?}", s.visible_bounds());
+    }
+
+    #[test]
+    fn a_zero_scale_insert_of_a_real_block_draws_nothing() {
+        // The earlier version of this test named a block that did not exist, so the INSERT exited
+        // on the missing-block branch and never reached the scale check at all.
+        let s = load("malformed.dxf");
+        let near = |x: f64, y: f64| s.polys.iter().any(|p| p.bbox.center().dist(v2(x, y)) < 6.0);
+        assert!(near(40.0, 40.0), "the control insert at a usable scale should draw");
+        assert!(!near(0.0, 40.0), "a zero-scale insert should draw nothing");
+    }
+
+    #[test]
+    fn a_layer_name_is_matched_without_regard_to_case() {
+        // AutoCAD treats table names case-insensitively, so "Walls" and "WALLS" are one layer.
+        let dr =
+            crate::read::load(format!("{}/tests/fixtures/basic.dxf", env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let c = Ctx::new(&dr, Options::default());
+        let n = c.scene.layers.len();
+        for name in ["WALLS", "walls", "Walls", "wAlLs"] {
+            assert!(c.layer_ids.contains_key(&name.to_uppercase()), "{name}");
+        }
+        assert_eq!(n, 4, "case variants must not create extra layers");
     }
 
     #[test]

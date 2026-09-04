@@ -54,6 +54,9 @@ pub struct Poly {
     /// The entity's own dash-length multiplier (DXF group 48), on top of the drawing's `$LTSCALE`.
     pub linetype_scale: f32,
     pub closed: bool,
+    /// True for RAY and XLINE, which are infinite. They are drawn, but they are left out of the
+    /// drawing extent — otherwise one construction line makes zoom-to-fit show empty space.
+    pub unbounded: bool,
     pub bbox: Aabb,
     pub source: CurveSource,
 }
@@ -268,7 +271,7 @@ impl Scene {
     pub fn visible_bounds(&self) -> Aabb {
         let mut b = Aabb::EMPTY;
         for p in &self.polys {
-            if self.is_visible(p.layer) {
+            if self.is_visible(p.layer) && !p.unbounded {
                 b = b.union(&p.bbox);
             }
         }

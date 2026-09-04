@@ -175,6 +175,7 @@ mod tests {
             linetype: 0,
             linetype_scale: 1.0,
             closed: false,
+            unbounded: false,
             bbox: b,
             source: CurveSource::None,
         }

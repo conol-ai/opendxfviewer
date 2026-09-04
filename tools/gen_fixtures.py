@@ -194,12 +194,34 @@ def mtext(x, y, h, s, width=0.0, attach=1, rot=0.0, layer="0", color=None):
 
 
 def insert(name, x, y, sx=1.0, sy=1.0, rot=0.0, cols=1, rows=1, cspace=0.0, rspace=0.0,
-           layer="0", color=None):
+           layer="0", color=None, attribs=None):
+    """attribs: list of (tag, value, x, y, height) drawn after the INSERT, as AutoCAD writes them."""
     p = [(0, "INSERT"), (8, layer)]
     if color is not None: p.append((62, color))
+    if attribs: p.append((66, 1))          # "attributes follow"
     p += [(2, name), (10, x), (20, y), (30, 0.0), (41, sx), (42, sy), (43, 1.0), (50, rot)]
     if cols > 1 or rows > 1:
         p += [(70, cols), (71, rows), (44, cspace), (45, rspace)]
+    out = [chunk(*p)]
+    for (tag, value, ax, ay, ah) in (attribs or []):
+        out.append(chunk((0, "ATTRIB"), (8, layer), (10, ax), (20, ay), (30, 0.0),
+                         (40, ah), (1, value), (2, tag), (70, 0), (50, 0.0)))
+    if attribs:
+        out.append(chunk((0, "SEQEND"), (8, layer)))
+    return "\n".join(out)
+
+
+def ray(x, y, dx, dy, layer="0", color=None):
+    p = [(0, "RAY"), (8, layer)]
+    if color is not None: p.append((62, color))
+    p += [(10, x), (20, y), (30, 0.0), (11, dx), (21, dy), (31, 0.0)]
+    return chunk(*p)
+
+
+def xline(x, y, dx, dy, layer="0", color=None):
+    p = [(0, "XLINE"), (8, layer)]
+    if color is not None: p.append((62, color))
+    p += [(10, x), (20, y), (30, 0.0), (11, dx), (21, dy), (31, 0.0)]
     return chunk(*p)
 
 
@@ -343,6 +365,12 @@ def f_ocs():
     d.add(circle(30, 0, 20, color=1, normal=(0, 0, -1)))
     # arbitrary axis algorithm: normal close to +Z but not exactly (below 1/64)
     d.add(arc(0, 30, 20, 0, 180, color=3, normal=(0.001, 0.001, 1.0)))
+    # A mirrored arc whose start angle is NOT zero. Under -Z extrusion the OCS x axis is negated,
+    # so the image of OCS angle t is at (pi - t), not (pi + t). An arc starting at 0 cannot tell
+    # the two apart, which is why this one starts at 45.
+    d.add(arc(0, -40, 20, 45, 135, color=2, normal=(0, 0, -1)))
+    # Just above the 1/64 threshold, so the algorithm takes the world-Z branch instead.
+    d.add(arc(60, -40, 15, 0, 90, color=4, normal=(0.02, 0.0, 1.0)))
     # normal in the XY plane -> the "Wy cross" branch of the AAA
     d.add(circle(0, 0, 25, color=5, normal=(1.0, 0.0, 0.0)))
     d.add(lwpoly([(0, 0), (40, 0), (40, 40)], color=6, normal=(0, 0, -1)))
@@ -389,6 +417,29 @@ def f_large(n_cells=140):
     return d
 
 
+def f_annotation():
+    """Attributes on an INSERT, control codes, Middle justification, and construction lines."""
+    d = Dxf()
+    d.layer("0", 7); d.layer("TAGS", 2); d.layer("CONSTRUCTION", 8, "DASHED")
+    d.block("PART", (0, 0), [
+        lwpoly([(-10, -6), (10, -6), (10, 6), (-10, 6)], closed=True, layer="0", color=0),
+        chunk((0, "ATTDEF"), (8, "0"), (10, -8.0), (20, -2.0), (30, 0.0), (40, 3.0),
+              (1, ""), (3, "Part tag"), (2, "TAG"), (70, 0)),
+    ])
+    d.add(insert("PART", 0, 0, layer="TAGS", color=2,
+                 attribs=[("TAG", "PUMP-101", -8.0, -2.0, 3.0)]))
+    d.add(insert("PART", 40, 0, layer="TAGS", color=3,
+                 attribs=[("TAG", "%%c50 BORE", 32.0, -2.0, 3.0)]))
+    d.add(insert("PART", 80, 0, layer="TAGS"))              # no attributes at all
+    # Control codes in plain TEXT, and the justification that centres in both directions.
+    d.add(text(0, 20, 4, "%%c44 %%p0.1 45%%d", layer="0", color=1))
+    d.add(text(0, 30, 4, "middle", halign=4, valign=0, x2=0.0, y2=30.0, layer="0", color=5))
+    # Construction lines: infinite, and must not drag the drawing extent out with them.
+    d.add(ray(0, 0, 1.0, 1.0, layer="CONSTRUCTION"))
+    d.add(xline(0, 10, 1.0, 0.0, layer="CONSTRUCTION"))
+    return d
+
+
 def f_latin1():
     """Pre-R2007, so the text is Windows-1252 rather than UTF-8."""
     d = Dxf(version="AC1015", codepage="ANSI_1252")
@@ -410,7 +461,11 @@ def f_malformed():
     d.add(line(1e9, 1e9, -1e9, -1e9))            # huge coords
     d.add(circle(0, 0, 1e-9, color=2))           # sub-epsilon
     d.add(text(0, 20, 0.0, "zero height"))       # zero text height
-    d.add(insert("NOPE", 0, 40, sx=0.0, sy=0.0))  # zero scale insert
+    # A zero-scale INSERT of a block that DOES exist: naming a missing one would exit on the
+    # missing-block branch and never reach the scale check.
+    d.block("REAL", (0, 0), [circle(0, 0, 5, layer="0")])
+    d.add(insert("REAL", 0, 40, sx=0.0, sy=0.0))
+    d.add(insert("REAL", 40, 40, sx=1.0, sy=1.0))   # the same block at a usable scale, as a control
     d.add(spline([(0, 60), (10, 70)], [0, 0, 1, 1], 3))  # degree > n_ctrl-1
     return d
 
@@ -560,6 +615,7 @@ FIXTURES = {
     "empty.dxf": f_empty,
     "malformed.dxf": f_malformed,
     "showcase.dxf": f_showcase,
+    "annotation.dxf": f_annotation,
     "latin1.dxf": f_latin1,
 }
 

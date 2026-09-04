@@ -462,8 +462,7 @@ impl App {
 
 fn load_blocking(path: &Path, opts: &convert::Options) -> Result<Scene, String> {
     let started = std::time::Instant::now();
-    let drawing =
-        dxf::Drawing::load_file(path).map_err(|e| format!("Could not read this file: {e}"))?;
+    let drawing = crate::read::load(path)?;
     let mut scene = convert::convert(&drawing, opts);
     scene.stats.load_ms = started.elapsed().as_millis() as u32;
     Ok(scene)

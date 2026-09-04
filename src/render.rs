@@ -721,6 +721,7 @@ mod tests {
             linetype: 0,
             linetype_scale: 1.0,
             closed: true,
+            unbounded: false,
             bbox: Aabb::new(v2(-100.0, -100.0), v2(100.0, 100.0)),
             // No curve source, so `refined` cannot rebuild it — decimation is the only lever.
             source: CurveSource::None,
@@ -765,6 +766,7 @@ mod tests {
             linetype: 0,
             linetype_scale: 1.0,
             closed: false,
+            unbounded: false,
             bbox: Aabb::new(v2(-5e5, 0.0), v2(5e5, 0.0)),
             source: CurveSource::None,
         });
@@ -846,6 +848,7 @@ mod tests {
             linetype: 0,
             linetype_scale: 1.0,
             closed: false,
+            unbounded: false,
             bbox: Aabb::new(v2(-100.0, 0.0), v2(100.0, 0.0)),
             source: CurveSource::None,
         });
@@ -935,6 +938,7 @@ mod tests {
             linetype: 1,
             linetype_scale: 1.0,
             closed: false,
+            unbounded: false,
             bbox: Aabb::new(v2(0.0, 0.0), v2(1000.0, 0.0)),
             source: CurveSource::None,
         });
