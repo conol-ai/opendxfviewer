@@ -676,6 +676,68 @@ mod tests {
     }
 
     #[test]
+    fn zooming_in_refines_ellipses_and_splines_too() {
+        // The arc branch had a test; these two did not, so either could have been deleted.
+        let s = scene_of("curves.dxf");
+        for (label, want) in [("ellipse", true), ("spline", true)] {
+            let idx = s
+                .polys
+                .iter()
+                .position(|p| {
+                    matches!(
+                        (&p.source, label),
+                        (CurveSource::Ellipse { .. }, "ellipse")
+                            | (CurveSource::Spline { .. }, "spline")
+                    )
+                })
+                .unwrap_or_else(|| panic!("no {label} in the fixture"));
+            let stored = s.polys[idx].len as usize;
+
+            let mut cam = Camera {
+                center: s.polys[idx].bbox.center(),
+                scale: 20_000.0,
+                view: Aabb::new(V2::ZERO, v2(1600.0, 1000.0)),
+            };
+            let mut buf = Vec::new();
+            let close = refined(&s, idx, &cam, &mut buf).len();
+            assert_eq!(
+                close > stored,
+                want,
+                "{label}: {close} vertices at 20000x vs {stored} stored"
+            );
+
+            // Zoomed far out, the stored tessellation is already more than the view can show.
+            cam.scale = 0.01;
+            let mut buf = Vec::new();
+            assert_eq!(refined(&s, idx, &cam, &mut buf).len(), stored, "{label} rebuilt when idle");
+            assert!(buf.is_empty(), "{label} touched the scratch buffer needlessly");
+        }
+    }
+
+    #[test]
+    fn a_refined_curve_still_traces_the_same_shape() {
+        // Refinement must add detail, not move the curve.
+        let s = scene_of("curves.dxf");
+        let idx =
+            s.polys.iter().position(|p| matches!(p.source, CurveSource::Ellipse { .. })).unwrap();
+        let cam = Camera {
+            center: s.polys[idx].bbox.center(),
+            scale: 20_000.0,
+            view: Aabb::new(V2::ZERO, v2(1600.0, 1000.0)),
+        };
+        let mut buf = Vec::new();
+        let fine = refined(&s, idx, &cam, &mut buf).to_vec();
+        let coarse = s.vertices(&s.polys[idx]);
+        // Every stored vertex lies on the refined curve, within the coarse chord tolerance.
+        let size = s.polys[idx].bbox.size();
+        let tol = size.x.max(size.y) * 5e-3;
+        for c in coarse {
+            let d = fine.iter().map(|f| f.dist(*c)).fold(f64::INFINITY, f64::min);
+            assert!(d < tol, "refinement moved the curve by {d} (tol {tol})");
+        }
+    }
+
+    #[test]
     fn tiny_primitives_collapse_to_a_dot_instead_of_a_polyline() {
         let s = scene_of("basic.dxf");
         let mut cam = fitted(&s, 800.0, 600.0);

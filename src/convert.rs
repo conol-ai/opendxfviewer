@@ -1150,16 +1150,24 @@ fn valign(v: VerticalTextJustification) -> VAlign {
 /// Which point a TEXT entity actually sits on.
 ///
 /// DXF keeps the insertion point in group 10 but ignores it whenever the text is justified: the
-/// alignment point in group 11 takes over. Only plain left/baseline text uses group 10.
+/// alignment point in group 11 takes over. Two exceptions matter:
+///
+/// * `Aligned` and `Fit` use *both* points as the ends of a span the text is stretched between, so
+///   group 10 is still the start. Reading group 11 there anchors the run on the wrong end.
+/// * The codes are trusted rather than the values. An earlier version ignored a group 11 of
+///   (0,0,0), which silently moved any justified text whose alignment point was the origin.
 fn text_anchor(
     location: &Point,
     second: &Point,
     h: HorizontalTextJustification,
     v: VerticalTextJustification,
 ) -> V2 {
-    let uses_second = !(matches!(h, HorizontalTextJustification::Left)
-        && matches!(v, VerticalTextJustification::Baseline));
-    if uses_second && (second.x != 0.0 || second.y != 0.0 || second.z != 0.0) {
+    use HorizontalTextJustification as H;
+    if matches!(h, H::Aligned | H::Fit) {
+        return pt(location);
+    }
+    let justified = !matches!(h, H::Left) || !matches!(v, VerticalTextJustification::Baseline);
+    if justified {
         pt(second)
     } else {
         pt(location)
@@ -1658,6 +1666,35 @@ mod tests {
         // Left/baseline text uses group 10; everything else uses the alignment point in group 11.
         assert!(by("left/base").pos.dist(v2(0.0, 100.0)) < 1e-9);
         assert!(by("center/base").pos.dist(v2(0.0, 80.0)) < 1e-9);
+    }
+
+    #[test]
+    fn aligned_and_fit_text_anchors_on_the_start_of_its_span() {
+        use HorizontalTextJustification as H;
+        use VerticalTextJustification as V;
+        let start = Point::new(10.0, 20.0, 0.0);
+        let end = Point::new(90.0, 20.0, 0.0);
+        // Aligned and Fit give the two ends of a span; the run starts at group 10.
+        for h in [H::Aligned, H::Fit] {
+            assert_eq!(text_anchor(&start, &end, h, V::Baseline), v2(10.0, 20.0), "{h:?}");
+        }
+        // Every other justification relocates the anchor to group 11.
+        assert_eq!(text_anchor(&start, &end, H::Center, V::Baseline), v2(90.0, 20.0));
+        assert_eq!(text_anchor(&start, &end, H::Left, V::Top), v2(90.0, 20.0));
+        // Plain left/baseline stays on group 10.
+        assert_eq!(text_anchor(&start, &end, H::Left, V::Baseline), v2(10.0, 20.0));
+    }
+
+    #[test]
+    fn a_justified_text_anchored_at_the_origin_stays_there() {
+        use HorizontalTextJustification as H;
+        use VerticalTextJustification as V;
+        // The justification codes are what say group 11 is in use; an alignment point that
+        // happens to be (0,0,0) is a real position, not an absent one.
+        let away = Point::new(500.0, 500.0, 0.0);
+        let origin = Point::new(0.0, 0.0, 0.0);
+        assert_eq!(text_anchor(&away, &origin, H::Center, V::Baseline), V2::ZERO);
+        assert_eq!(text_anchor(&away, &origin, H::Right, V::Middle), V2::ZERO);
     }
 
     #[test]
