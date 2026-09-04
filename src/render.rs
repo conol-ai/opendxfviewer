@@ -7,8 +7,6 @@
 //! The batch is rebuilt whenever the view changes. That is affordable because culling bounds the
 //! work by what is on screen rather than by the size of the drawing.
 
-use std::collections::HashSet;
-
 use crate::camera::Camera;
 use crate::geom::{clip_segment, v2, Aabb, V2};
 use crate::scene::{CurveSource, HAlign, PrimKind, Rgb, Scene, VAlign};
@@ -68,6 +66,22 @@ pub struct Style {
     pub max_segments: usize,
 }
 
+impl Style {
+    /// A coarser variant for use while the user is actively panning or zooming.
+    ///
+    /// Dropping detail during a drag and restoring it when the view settles is the standard CAD
+    /// trade: a dense drawing stays responsive under the hand, and the frame the user actually
+    /// stops to look at is drawn in full.
+    pub fn preview(&self) -> Style {
+        Style {
+            min_feature_px: self.min_feature_px.max(4.0),
+            min_text_px: self.min_text_px.max(8.0),
+            max_segments: self.max_segments.min(400_000),
+            ..*self
+        }
+    }
+}
+
 impl Default for Style {
     fn default() -> Self {
         Style {
@@ -84,6 +98,9 @@ impl Default for Style {
 }
 
 /// The result of one build pass.
+///
+/// Reuse the same `Batch` across frames: it owns the scratch buffers, so a steady-state pan or zoom
+/// allocates nothing.
 #[derive(Clone, Debug, Default)]
 pub struct Batch {
     pub segs: Vec<Seg>,
@@ -95,6 +112,17 @@ pub struct Batch {
     pub drawn: usize,
     /// True when [`Style::max_segments`] cut the frame short.
     pub truncated: bool,
+
+    /// Per-primitive "last frame that touched this", one array per [`PrimKind`].
+    ///
+    /// The grid reports a primitive once per cell it spans, so a long line comes back many times
+    /// and has to be deduplicated. A generation stamp does that with one array read and no
+    /// hashing — at a few hundred thousand candidates per frame, hashing was the single largest
+    /// cost in the whole draw path.
+    seen: [Vec<u32>; 4],
+    generation: u32,
+    /// Scratch for re-tessellated curves.
+    buf: Vec<V2>,
 }
 
 impl Batch {
@@ -106,11 +134,43 @@ impl Batch {
         self.drawn = 0;
         self.truncated = false;
     }
+
+    /// Start a frame: bump the generation and make sure the stamp arrays cover the scene.
+    fn begin(&mut self, scene: &Scene) {
+        self.clear();
+        let sizes = [scene.polys.len(), scene.dots.len(), scene.tris.len(), scene.texts.len()];
+        // Wrapping would make a stale stamp look current, so restart the arrays instead.
+        let (generation, reset) = match self.generation.checked_add(1) {
+            Some(g) => (g, false),
+            None => (1, true),
+        };
+        self.generation = generation;
+        for (a, n) in self.seen.iter_mut().zip(sizes) {
+            if a.len() != n || reset {
+                a.clear();
+                a.resize(n, 0);
+            }
+        }
+    }
+
+    fn first_sighting(&mut self, kind: PrimKind, idx: u32) -> bool {
+        let a = &mut self.seen[kind as usize];
+        match a.get_mut(idx as usize) {
+            Some(slot) if *slot == self.generation => false,
+            Some(slot) => {
+                *slot = self.generation;
+                true
+            }
+            // The stamp arrays are sized from the scene, so this only happens if the scene changed
+            // underneath us. Drawing it twice is better than not drawing it.
+            None => true,
+        }
+    }
 }
 
 /// Build the batch for `cam`'s current view of `scene`.
 pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
-    out.clear();
+    out.begin(scene);
     if scene.is_empty() {
         return;
     }
@@ -120,28 +180,24 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
     let world_view = cam.visible_world(margin);
     let clip = cam.view.expand(margin);
 
-    // The grid reports a primitive once per cell it spans, so a long line can come back many
-    // times. Deduplicate the ones that can span cells; dots never can.
-    let mut seen: HashSet<(u8, u32)> = HashSet::new();
-    let mut buf: Vec<V2> = Vec::new();
+    // Take the scratch buffer out so the loop can borrow `out` mutably alongside it.
+    let mut buf = std::mem::take(&mut out.buf);
+    buf.clear();
 
-    let mut items: Vec<(PrimKind, u32)> = Vec::new();
-    scene.query(&world_view, |k, i| items.push((k, i)));
-    out.considered = items.len();
-
-    for (kind, idx) in items {
+    scene.query(&world_view, |kind, idx| {
+        out.considered += 1;
         if out.segs.len() >= style.max_segments {
             out.truncated = true;
-            break;
+            return;
         }
-        if kind != PrimKind::Dot && !seen.insert((kind as u8, idx)) {
-            continue;
+        if !out.first_sighting(kind, idx) {
+            return;
         }
         match kind {
             PrimKind::Poly => {
                 let p = &scene.polys[idx as usize];
                 if !scene.is_visible(p.layer) || !p.bbox.intersects(&world_view) {
-                    continue;
+                    return;
                 }
                 let sb = screen_bbox(cam, &p.bbox);
                 let s = sb.size();
@@ -149,18 +205,21 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
                 if s.x < style.min_feature_px && s.y < style.min_feature_px {
                     push_dot(out, sb.center(), (style.line_width * 0.5).max(0.5), p.color, &clip);
                     out.drawn += 1;
-                    continue;
+                    return;
                 }
                 let hw = half_width(style, p.lineweight, scene, p.layer);
                 buf.clear();
                 let pts = refined(scene, idx as usize, cam, style, &mut buf);
-                emit_polyline(out, cam, pts, p.closed, hw, p.color, &clip, style);
+                // Nothing wider than a pixel apart can be told apart on screen, so skip vertices
+                // rather than transforming every one of a curve stored for a closer view.
+                let stride = stride_for(pts.len(), s.x.max(s.y));
+                emit_polyline(out, cam, pts, stride, p.closed, hw, p.color, &clip, style);
                 out.drawn += 1;
             }
             PrimKind::Dot => {
                 let d = &scene.dots[idx as usize];
                 if !scene.is_visible(d.layer) || !world_view.contains(d.pos) {
-                    continue;
+                    return;
                 }
                 push_dot(out, cam.world_to_screen(d.pos), style.point_size * 0.5, d.color, &clip);
                 out.drawn += 1;
@@ -168,7 +227,7 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
             PrimKind::Tri => {
                 let t = &scene.tris[idx as usize];
                 if !scene.is_visible(t.layer) || !t.bbox.intersects(&world_view) {
-                    continue;
+                    return;
                 }
                 let (a, b, c) =
                     (cam.world_to_screen(t.a), cam.world_to_screen(t.b), cam.world_to_screen(t.c));
@@ -187,11 +246,11 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
             PrimKind::Text => {
                 let t = &scene.texts[idx as usize];
                 if !scene.is_visible(t.layer) || !t.bbox.intersects(&world_view) {
-                    continue;
+                    return;
                 }
                 let h = t.height * cam.scale;
                 if h < style.min_text_px {
-                    continue;
+                    return;
                 }
                 if h > style.max_text_px {
                     // Absurdly zoomed-in text: outline where it sits rather than rasterising a
@@ -201,7 +260,7 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
                         push_seg(out, p, q, style.line_width * 0.5, t.color, &clip);
                     }
                     out.drawn += 1;
-                    continue;
+                    return;
                 }
                 out.runs.push(Run {
                     text: t.text.clone(),
@@ -216,7 +275,8 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
                 out.drawn += 1;
             }
         }
-    }
+    });
+    out.buf = buf;
 }
 
 /// Vertices for a polyline, re-tessellating the curve it came from when the view has zoomed past
@@ -277,11 +337,25 @@ fn refined<'a>(
     }
 }
 
+/// How many vertices to skip for a polyline of `n` points spanning `px` pixels.
+///
+/// Two samples per pixel is the most a display can resolve; beyond that the extra vertices only
+/// cost transforms. Capped so a long polyline never degenerates into a couple of chords.
+fn stride_for(n: usize, px: f64) -> usize {
+    let budget = (px * 2.0).max(8.0);
+    if (n as f64) <= budget {
+        1
+    } else {
+        ((n as f64 / budget).floor() as usize).max(1)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_polyline(
     out: &mut Batch,
     cam: &Camera,
     pts: &[V2],
+    stride: usize,
     closed: bool,
     half_w: f32,
     color: Rgb,
@@ -294,13 +368,20 @@ fn emit_polyline(
         }
         return;
     }
+    debug_assert!(stride >= 1);
     let mut prev = cam.world_to_screen(pts[0]);
     let first = prev;
     // Collapse runs of sub-pixel segments: a curve tessellated for a zoomed-in view emits hundreds
     // of vertices per pixel when zoomed out, and every one costs a quad.
     let min_step = style.min_feature_px.min(1.0);
     let mut pending: Option<V2> = None;
-    for &w in &pts[1..] {
+    // Always visit the final vertex, whatever the stride, so the shape closes where it should.
+    let last = pts.len() - 1;
+    let walk = pts[1..].iter().enumerate().filter_map(|(i, w)| {
+        let i = i + 1;
+        (i == last || i % stride == 0).then_some(*w)
+    });
+    for w in walk {
         let s = cam.world_to_screen(w);
         if (s - prev).len() < min_step {
             pending = Some(s);
@@ -478,13 +559,15 @@ mod tests {
         cam.scale = 4000.0; // the circle is now far wider than the window
         let mut buf = Vec::new();
         let pts = refined(&s, idx, &cam, &Style::default(), &mut buf);
-        assert!(pts.len() > stored, "expected refinement past {stored}, got {}", pts.len());
+        assert!(pts.len() > stored * 4, "expected refinement past {stored}, got {}", pts.len());
 
-        // Zoomed out, the stored tessellation is already finer than needed.
+        // Zoomed out, the stored tessellation already carries more detail than the view can show,
+        // so nothing is rebuilt and the stored vertices are handed back untouched.
         let mut buf = Vec::new();
-        let out = fitted(&s, 800.0, 600.0);
-        let pts = refined(&s, idx, &out, &Style::default(), &mut buf);
+        let far = Camera { scale: 0.05, ..cam };
+        let pts = refined(&s, idx, &far, &Style::default(), &mut buf);
         assert_eq!(pts.len(), stored);
+        assert!(buf.is_empty(), "the scratch buffer should not have been touched");
     }
 
     #[test]
@@ -505,16 +588,50 @@ mod tests {
 
     #[test]
     fn sub_pixel_vertices_are_collapsed_when_zoomed_out() {
-        let s = scene_of("curves.dxf");
-        let cam = fitted(&s, 800.0, 600.0);
+        // A single finely tessellated circle, viewed small enough that most of its vertices land
+        // on the same pixel.
+        let mut s = Scene::default();
+        let mut pts = Vec::new();
+        tess::flatten_circle(V2::ZERO, 100.0, Tol::new(1e-4).with_max(4096), &mut pts);
+        assert!(pts.len() > 1000, "need a dense curve to decimate, got {}", pts.len());
+        let n = pts.len() as u32;
+        s.verts = pts;
+        s.polys.push(crate::scene::Poly {
+            start: 0,
+            len: n,
+            layer: 0,
+            color: Rgb::WHITE,
+            lineweight: None,
+            linetype: 0,
+            closed: true,
+            bbox: Aabb::new(v2(-100.0, -100.0), v2(100.0, 100.0)),
+            // No curve source, so `refined` cannot rebuild it — decimation is the only lever.
+            source: CurveSource::None,
+        });
+        s.bounds = s.polys[0].bbox;
+        s.build_index();
+
+        // 60 px across: two samples per pixel is about 120 segments, not 1000+.
+        let cam =
+            Camera { center: V2::ZERO, scale: 0.3, view: Aabb::new(V2::ZERO, v2(800.0, 600.0)) };
         let b = build_now(&s, &cam);
-        // The stored tessellation is far finer than 800x600 can show.
-        let stored: u32 = s.polys.iter().map(|p| p.len).sum();
-        assert!(
-            (b.segs.len() as u32) < stored,
-            "no vertex decimation happened: {} segments for {stored} vertices",
-            b.segs.len()
-        );
+        assert!(b.segs.len() < 200, "no decimation: {} segments for {n} vertices", b.segs.len());
+        assert!(b.segs.len() > 20, "decimated into a polygon: {} segments", b.segs.len());
+        // The ring must still close and still look like a circle.
+        for seg in &b.segs {
+            let r = (seg.a - cam.view.center()).len();
+            assert!((r - 30.0).abs() < 2.0, "decimation deformed the circle: r={r}");
+        }
+    }
+
+    #[test]
+    fn stride_never_reduces_a_polyline_below_a_usable_outline() {
+        assert_eq!(stride_for(4, 1000.0), 1, "short polylines are never strided");
+        assert_eq!(stride_for(10_000, 1e9), 1, "a huge view keeps every vertex");
+        assert!(stride_for(10_000, 100.0) > 1, "a small view should stride");
+        // Even at zero screen size the floor keeps at least 8 samples.
+        assert_eq!(stride_for(80, 0.0), 10);
+        assert!(stride_for(1_000_000, 0.0) <= 125_000);
     }
 
     #[test]
@@ -667,6 +784,20 @@ mod tests {
         // The index over-reports; the batch must not.
         assert!(b.considered >= b.drawn);
         assert_eq!(b.drawn, s.polys.len() + s.dots.len());
+    }
+
+    #[test]
+    fn preview_style_is_cheaper_but_still_shows_everything() {
+        let s = scene_of("basic.dxf");
+        let cam = fitted(&s, 800.0, 600.0);
+        let full = Style::default();
+        let mut a = Batch::default();
+        build(&s, &cam, &full, &mut a);
+        let mut b = Batch::default();
+        build(&s, &cam, &full.preview(), &mut b);
+        assert!(b.segs.len() <= a.segs.len(), "preview emitted more work than full detail");
+        // Coarser, but every primitive is still accounted for — preview drops detail, not objects.
+        assert_eq!(b.drawn, a.drawn);
     }
 
     #[test]

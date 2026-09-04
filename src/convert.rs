@@ -33,6 +33,10 @@ pub struct Options {
     pub dark_background: bool,
     /// Chord tolerance as a fraction of each curve's own size. Relative rather than absolute so a
     /// 5 mm fillet and a 500 m arc are both smooth without a prepass over the drawing extent.
+    ///
+    /// This only sets the *baseline*: the renderer re-tessellates a curve when the view zooms past
+    /// what the stored vertices can carry, so the baseline is chosen for memory, not for fidelity.
+    /// 4e-3 puts about 35 vertices on a full circle, which is smooth at 1:1.
     pub curve_quality: f64,
     /// How deep nested INSERTs may go before we stop and warn.
     pub max_block_depth: u32,
@@ -44,7 +48,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             dark_background: true,
-            curve_quality: 3e-4,
+            curve_quality: 4e-3,
             max_block_depth: 16,
             max_primitives: 4_000_000,
         }
