@@ -202,6 +202,11 @@ impl Nurbs {
                 Vec::new()
             };
 
+        // Clamp first: the wrap below repeats exactly `degree` control points, so clamping
+        // afterwards would leave the curve wrapped for one degree and evaluated at another, and
+        // it would not close.
+        degree = degree.clamp(1, ctrl.len() - 1);
+
         if closed {
             // A periodic curve is closed by wrapping `degree` control points onto the end. Files
             // that already repeat them are left alone.
@@ -217,8 +222,6 @@ impl Nurbs {
                 knots.clear(); // the file's knot vector no longer matches
             }
         }
-
-        degree = degree.clamp(1, ctrl.len() - 1);
 
         let want = ctrl.len() + degree + 1;
         let usable = knots.len() == want
@@ -783,6 +786,19 @@ mod tests {
         let c = nurbs(3, &ctrl, &[], &[], true);
         let (lo, hi) = c.domain();
         assert!(c.eval(lo).dist(c.eval(hi)) < 1e-9, "{:?} vs {:?}", c.eval(lo), c.eval(hi));
+    }
+
+    #[test]
+    fn a_closed_spline_closes_whatever_degree_the_file_claims() {
+        // The wrap repeats `degree` control points, so the degree has to be settled before the
+        // wrap rather than after it, or the two disagree and the curve gapes open.
+        let ctrl = [v2(0.0, 0.0), v2(10.0, 0.0), v2(10.0, 10.0), v2(0.0, 10.0)];
+        for claimed in [1, 2, 3, 5, 9, 100] {
+            let c = Nurbs::repair(claimed, ctrl.to_vec(), vec![], vec![], true).unwrap();
+            let (lo, hi) = c.domain();
+            let gap = c.eval(lo).dist(c.eval(hi));
+            assert!(gap < 1e-9, "degree {claimed} left a gap of {gap}");
+        }
     }
 
     #[test]

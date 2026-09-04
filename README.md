@@ -90,6 +90,19 @@ Five DXF details are handled once, at load, so the renderer never sees them:
 - Anything else unsupported is **counted and reported in the status bar**
   rather than dropped silently.
 
+### Hostile input
+
+A viewer opens files it did not write, so malformed and deliberately hostile
+DXF is a normal case rather than an edge case. Blocks that reference themselves
+or each other are detected and reported; nesting stops at a depth limit;
+conversion stops at a primitive and a vertex budget, both of which are latched
+so a runaway block array stops *working*, not merely stops emitting. Angles of
+infinity, coordinates that overflow when subtracted, splines whose declared
+degree exceeds their control points, and drawings with more layers than the
+layer id can address are all handled rather than crashing or hanging. A 30000 x
+30000 `MINSERT` array of a twenty-circle block converts in under two seconds
+and half a gigabyte, with a warning saying it was cut short.
+
 ## Performance
 
 Measured on an Apple M-series laptop, release build, against a generated
@@ -125,7 +138,7 @@ carry coordinates in the millions, where `f32` quantises to centimetres.
 ## Building
 
 ```sh
-cargo test            # 128 tests, no GPU needed
+cargo test            # 153 tests, no GPU needed
 cargo clippy --all-targets -- -D warnings
 cargo run --release -- tests/fixtures/basic.dxf
 ```

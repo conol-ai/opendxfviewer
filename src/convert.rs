@@ -42,6 +42,12 @@ pub struct Options {
     pub max_block_depth: u32,
     /// Total primitives after which conversion stops. Guards against a block-array bomb.
     pub max_primitives: usize,
+    /// Total vertices after which conversion stops.
+    ///
+    /// Primitives alone do not bound memory: a MINSERT array of a block full of circles produces
+    /// tens of vertices per primitive, and it is the vertex arena that grows. At 16 bytes each,
+    /// this caps the arena at about 320 MB.
+    pub max_vertices: usize,
 }
 
 impl Default for Options {
@@ -50,7 +56,10 @@ impl Default for Options {
             dark_background: true,
             curve_quality: 4e-3,
             max_block_depth: 16,
-            max_primitives: 4_000_000,
+            // A 169k-entity drawing converts to 145k primitives and 2.9M vertices, so these leave
+            // roughly an order of magnitude of headroom over anything real.
+            max_primitives: 2_000_000,
+            max_vertices: 20_000_000,
         }
     }
 }
@@ -159,6 +168,9 @@ impl<'a> Ctx<'a> {
                 e.linetype = linetype;
                 continue;
             }
+            if scene.layers.len() >= MAX_LAYERS {
+                continue;
+            }
             let id = scene.layers.len() as u16;
             scene.layers.push(Layer {
                 name: l.name.clone(),
@@ -207,8 +219,10 @@ impl<'a> Ctx<'a> {
             self.unsupported.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         if self.truncated {
             self.scene.stats.warnings.push(format!(
-                "Stopped after {} primitives; the drawing is larger than the viewer's limit.",
-                self.opts.max_primitives
+                "Stopped after {} primitives and {} vertices; this drawing is larger than the \
+                 viewer's limit.",
+                self.scene.stats.primitives,
+                self.scene.verts.len()
             ));
         }
         let mut b = Aabb::EMPTY;
@@ -245,6 +259,14 @@ impl<'a> Ctx<'a> {
             // drawing with a thousand entities on one undefined layer produces one layer and not
             // a thousand — which is why `emit` takes `&'a Entity` rather than a short borrow.
             None => {
+                // The id is a u16, and `len() as u16` would wrap silently at 65536, aliasing
+                // every later layer onto layer 0. Past the limit, share the last slot instead.
+                if self.scene.layers.len() >= MAX_LAYERS {
+                    self.warn(format!(
+                        "This drawing has more than {MAX_LAYERS} layers; the rest share one entry."
+                    ));
+                    return (MAX_LAYERS - 1) as u16;
+                }
                 let fg = if self.opts.dark_background { Rgb::WHITE } else { Rgb::BLACK };
                 let id = self.scene.layers.len() as u16;
                 self.scene.layers.push(Layer {
@@ -299,9 +321,15 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// True once conversion has hit a limit and should stop.
+    ///
+    /// This latches on `truncated`: when a primitive is refused for want of vertex budget it does
+    /// not raise the primitive count, so without the latch a block array would keep tessellating
+    /// and discarding for the rest of its 900 million cells.
     fn full(&self) -> bool {
-        self.scene.polys.len() + self.scene.tris.len() + self.scene.dots.len()
-            >= self.opts.max_primitives
+        self.truncated
+            || self.scene.stats.primitives >= self.opts.max_primitives
+            || self.scene.verts.len() >= self.opts.max_vertices
     }
 
     // -- emitters -------------------------------------------------------------------------
@@ -317,6 +345,10 @@ impl<'a> Ctx<'a> {
         }
         let bbox = tess::bounds(&pts);
         if bbox.is_empty() {
+            return;
+        }
+        if self.scene.verts.len() + pts.len() > self.opts.max_vertices {
+            self.truncated = true;
             return;
         }
         let start = self.scene.verts.len() as u32;
@@ -911,6 +943,8 @@ impl<'a> Ctx<'a> {
 
 /// Where a RAY or XLINE is cut off, in drawing units.
 const RAY_LENGTH: f64 = 1e7;
+/// Layer ids are `u16`, so this is the most a scene can address.
+const MAX_LAYERS: usize = u16::MAX as usize;
 /// MTEXT default line spacing, as a multiple of the text height.
 const MTEXT_LINE_SPACING: f64 = 1.6;
 /// Rough advance width of a glyph relative to the cap height, used only for bounding boxes.
@@ -1897,6 +1931,95 @@ mod tests {
             assert!(c.layer_ids.contains_key(&name.to_uppercase()), "{name}");
         }
         assert_eq!(n, 4, "case variants must not create extra layers");
+    }
+
+    /// Build a drawing in memory: a block of `per_block` circles, arrayed `cols` x `rows`.
+    fn array_bomb(per_block: usize, cols: i16, rows: i16) -> Drawing {
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        let mut block = dxf::Block { name: "B".into(), ..Default::default() };
+        for i in 0..per_block {
+            block.entities.push(Entity::new(EntityType::Circle(Circle {
+                center: dxf::Point::new(i as f64, 0.0, 0.0),
+                radius: 1.0,
+                ..Default::default()
+            })));
+        }
+        dr.add_block(block);
+        dr.add_entity(Entity::new(EntityType::Insert(Insert {
+            name: "B".into(),
+            column_count: cols,
+            row_count: rows,
+            column_spacing: 5.0,
+            row_spacing: 5.0,
+            ..Default::default()
+        })));
+        dr
+    }
+
+    #[test]
+    fn a_block_array_cannot_run_away() {
+        // One INSERT claiming a 400x400 array of a 20-circle block is 3.2 million primitives and
+        // over a hundred million vertices. Both limits have to stop it, and stop it promptly.
+        let dr = array_bomb(20, 400, 400);
+        let opts = Options { max_primitives: 5_000, max_vertices: 50_000, ..Options::default() };
+        let s = convert(&dr, &opts);
+        assert!(s.stats.primitives <= opts.max_primitives, "{} primitives", s.stats.primitives);
+        assert!(s.verts.len() <= opts.max_vertices, "{} vertices", s.verts.len());
+        assert!(
+            s.stats.warnings.iter().any(|w| w.contains("larger than")),
+            "the user should be told it was cut short: {:?}",
+            s.stats.warnings
+        );
+    }
+
+    #[test]
+    fn the_vertex_budget_stops_the_work_and_not_just_the_output() {
+        // Refusing a primitive for want of vertex budget does not raise the primitive count, so
+        // without latching the limit the array would keep tessellating and discarding for the
+        // rest of its cells. A generous primitive cap and a tight vertex cap prove the latch.
+        let dr = array_bomb(20, 300, 300);
+        let opts =
+            Options { max_primitives: usize::MAX, max_vertices: 10_000, ..Options::default() };
+        let started = std::time::Instant::now();
+        let s = convert(&dr, &opts);
+        assert!(s.verts.len() <= opts.max_vertices);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "conversion kept working after the budget ran out"
+        );
+    }
+
+    #[test]
+    fn nested_blocks_stop_at_the_depth_limit() {
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        // A 40-deep chain, each level inserting the next.
+        for i in 0..40 {
+            let mut b = dxf::Block { name: format!("B{i}"), ..Default::default() };
+            b.entities.push(Entity::new(EntityType::Circle(Circle {
+                radius: 1.0,
+                ..Default::default()
+            })));
+            if i + 1 < 40 {
+                b.entities.push(Entity::new(EntityType::Insert(Insert {
+                    name: format!("B{}", i + 1),
+                    ..Default::default()
+                })));
+            }
+            dr.add_block(b);
+        }
+        dr.add_entity(Entity::new(EntityType::Insert(Insert {
+            name: "B0".into(),
+            ..Default::default()
+        })));
+        let s = convert(&dr, &Options { max_block_depth: 8, ..Options::default() });
+        assert!(s.polys.len() <= 8, "expanded {} levels past the limit", s.polys.len());
+        assert!(
+            s.stats.warnings.iter().any(|w| w.contains("levels deep")),
+            "{:?}",
+            s.stats.warnings
+        );
     }
 
     #[test]

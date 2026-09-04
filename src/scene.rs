@@ -315,10 +315,13 @@ pub struct Grid {
     pub cell: V2,
     pub cells: Vec<u32>,
     pub items: Vec<(PrimKind, u32)>,
+    /// Primitives that span too many cells to bucket. Listing a drawing-wide line in every cell it
+    /// touches would cost one entry per cell; these are reported on every query instead.
+    pub large: Vec<(PrimKind, u32)>,
 }
 
 impl Grid {
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.large.is_empty()
     }
 }

@@ -14,6 +14,10 @@ use crate::scene::{Grid, PrimKind, Scene};
 /// offset table on drawings whose primitives cluster.
 const TARGET_PER_CELL: f64 = 4.0;
 const MAX_CELLS: usize = 1 << 20;
+/// A primitive touching more cells than this goes on the always-reported list rather than being
+/// written into each one. Without a cap, a few drawing-wide construction lines would each add an
+/// entry per cell and the index would outgrow the scene it indexes.
+const MAX_CELLS_PER_PRIM: u64 = 256;
 
 impl Scene {
     /// Bucket every primitive into a uniform grid. Idempotent; safe to call after edits.
@@ -60,6 +64,9 @@ impl Scene {
                 f(PrimKind::Text, i as u32);
             }
             return;
+        }
+        for &(kind, idx) in &g.large {
+            f(kind, idx);
         }
         let (x0, y0, x1, y1) = g.cell_range(area);
         for cy in y0..=y1 {
@@ -120,15 +127,31 @@ fn build(bounds: Aabb, prims: &[(PrimKind, u32, Aabb)]) -> Grid {
     let cell = v2(ext.x / cols as f64, ext.y / rows as f64);
     let n = cols as usize * rows as usize;
 
-    let g = Grid { bounds, cols, rows, cell, cells: vec![0; n + 1], items: Vec::new() };
+    let g = Grid {
+        bounds,
+        cols,
+        rows,
+        cell,
+        cells: vec![0; n + 1],
+        items: Vec::new(),
+        large: Vec::new(),
+    };
 
     // Two passes: count per cell, prefix-sum into offsets, then scatter. No per-cell Vec.
     let mut counts = vec![0u32; n];
-    let mut spans: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(prims.len());
-    for (_, _, b) in prims {
-        let b = if b.is_empty() { Aabb::point(bounds.min) } else { *b };
+    let mut large: Vec<(PrimKind, u32)> = Vec::new();
+    // `None` marks a primitive that went on the always-reported list instead of into cells.
+    let mut spans: Vec<Option<(u32, u32, u32, u32)>> = Vec::with_capacity(prims.len());
+    for &(kind, idx, b) in prims {
+        let b = if b.is_empty() { Aabb::point(bounds.min) } else { b };
         let r = g.cell_range(&b);
-        spans.push(r);
+        let touched = (r.2 - r.0 + 1) as u64 * (r.3 - r.1 + 1) as u64;
+        if touched > MAX_CELLS_PER_PRIM {
+            large.push((kind, idx));
+            spans.push(None);
+            continue;
+        }
+        spans.push(Some(r));
         for cy in r.1..=r.3 {
             for cx in r.0..=r.2 {
                 counts[(cy * cols + cx) as usize] += 1;
@@ -146,7 +169,8 @@ fn build(bounds: Aabb, prims: &[(PrimKind, u32, Aabb)]) -> Grid {
 
     let mut items = vec![(PrimKind::Poly, 0u32); acc as usize];
     let mut cursor = cells.clone();
-    for (&(kind, idx, _), &r) in prims.iter().zip(&spans) {
+    for (&(kind, idx, _), span) in prims.iter().zip(&spans) {
+        let Some(r) = span else { continue };
         for cy in r.1..=r.3 {
             for cx in r.0..=r.2 {
                 let c = (cy * cols + cx) as usize;
@@ -156,7 +180,7 @@ fn build(bounds: Aabb, prims: &[(PrimKind, u32, Aabb)]) -> Grid {
         }
     }
 
-    Grid { bounds, cols, rows, cell, cells, items }
+    Grid { bounds, cols, rows, cell, cells, items, large }
 }
 
 #[cfg(test)]
@@ -281,6 +305,33 @@ mod tests {
             s.build_index();
             assert!(!hits(&s, bounds.expand(1.0)).is_empty());
         }
+    }
+
+    #[test]
+    fn a_primitive_spanning_the_whole_grid_is_not_written_into_every_cell() {
+        // Without a cap, a drawing-wide line costs one index entry per cell, and a handful of
+        // them make the index larger than the scene it indexes.
+        let mut s = grid_scene(64);
+        let cells = s.index.cells.len();
+        let before = s.index.items.len();
+        for _ in 0..20 {
+            s.polys.push(poly_at(Aabb::new(v2(-1e6, -1e6), v2(1e6, 1e6))));
+        }
+        s.build_index();
+        assert!(
+            s.index.items.len() < before + 20 * MAX_CELLS_PER_PRIM as usize,
+            "index grew by {} entries for 20 primitives",
+            s.index.items.len() - before
+        );
+        assert_eq!(s.index.large.len(), 20, "they should be on the always-reported list");
+        // And they are still found, from anywhere.
+        for &(x, y) in &[(0.0, 0.0), (32.0, 32.0), (-500.0, 500.0)] {
+            let got = hits(&s, Aabb::new(v2(x, y), v2(x + 0.1, y + 0.1)));
+            for i in (s.polys.len() - 20)..s.polys.len() {
+                assert!(got.contains(&(0u8, i as u32)), "large primitive {i} missed at {x},{y}");
+            }
+        }
+        let _ = cells;
     }
 
     #[test]

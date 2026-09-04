@@ -330,16 +330,20 @@ impl FromIterator<V2> for Aabb {
 /// The renderer relies on this: emitting an oriented quad per segment is only cheap if segments
 /// that stretch far outside the viewport are trimmed to it first.
 pub fn clip_segment(p0: V2, p1: V2, r: &Aabb) -> Option<(V2, V2)> {
-    if r.is_empty() {
+    if r.is_empty() || !p0.is_finite() || !p1.is_finite() {
         return None;
     }
-    let d = p1 - p0;
+    // Everything below is computed at half scale. `p1 - p0` overflows to infinity when the two
+    // endpoints straddle the float range — a DXF file with coordinates at ±1e308 does that — and
+    // the resulting `q / p` is NaN, which would reach the GPU as a vertex. Halving both sides of
+    // every ratio leaves `t` unchanged and cannot overflow, because each half is representable.
+    let d = v2(p1.x * 0.5 - p0.x * 0.5, p1.y * 0.5 - p0.y * 0.5);
     let (mut t0, mut t1) = (0.0f64, 1.0f64);
     for (p, q) in [
-        (-d.x, p0.x - r.min.x),
-        (d.x, r.max.x - p0.x),
-        (-d.y, p0.y - r.min.y),
-        (d.y, r.max.y - p0.y),
+        (-d.x, (p0.x - r.min.x) * 0.5),
+        (d.x, (r.max.x - p0.x) * 0.5),
+        (-d.y, (p0.y - r.min.y) * 0.5),
+        (d.y, (r.max.y - p0.y) * 0.5),
     ] {
         if p == 0.0 {
             if q < 0.0 {
@@ -363,7 +367,14 @@ pub fn clip_segment(p0: V2, p1: V2, r: &Aabb) -> Option<(V2, V2)> {
     if t0 > t1 {
         return None;
     }
-    Some((p0 + d * t0, p0 + d * t1))
+    // `d` is half the true delta, so the parameters double to compensate.
+    let a = p0 + d * (2.0 * t0);
+    let b = p0 + d * (2.0 * t1);
+    if a.is_finite() && b.is_finite() {
+        Some((a, b))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +422,31 @@ mod tests {
         b.add_point(v2(f64::NAN, 1.0));
         b.add_point(v2(f64::INFINITY, 1.0));
         assert_eq!(b, Aabb::point(V2::ZERO));
+    }
+
+    #[test]
+    fn clip_segment_survives_endpoints_that_straddle_the_float_range() {
+        // `p1 - p0` overflows here, and a naive Liang-Barsky divides infinity by infinity.
+        let r = Aabb::new(v2(0.0, 0.0), v2(10.0, 10.0));
+        for (a, b) in [
+            (v2(-f64::MAX, 5.0), v2(f64::MAX, 5.0)),
+            (v2(-1e308, 5.0), v2(1e308, 5.0)),
+            (v2(f64::MIN, f64::MIN), v2(f64::MAX, f64::MAX)),
+            (v2(1e308, 1e308), v2(-1e308, -1e308)),
+        ] {
+            if let Some((p, q)) = clip_segment(a, b, &r) {
+                assert!(p.is_finite() && q.is_finite(), "{a:?}..{b:?} -> {p:?}, {q:?}");
+                assert!(r.expand(1e-6).contains(p) && r.expand(1e-6).contains(q), "{p:?} {q:?}");
+            }
+        }
+        // At 1e308 a ten-unit box is far below the resolution of the line's parameterisation, so
+        // the result collapsing to a point is the honest answer — the defect was the NaN, not the
+        // collapse. At magnitudes f64 can actually resolve, the clip is exact.
+        let (p, q) = clip_segment(v2(-1e12, 5.0), v2(1e12, 5.0), &r).unwrap();
+        assert!((p.x - 0.0).abs() < 1e-6 && (q.x - 10.0).abs() < 1e-6, "{p:?} {q:?}");
+        // Non-finite input is rejected outright rather than producing NaN.
+        assert!(clip_segment(v2(f64::NAN, 0.0), v2(1.0, 1.0), &r).is_none());
+        assert!(clip_segment(v2(0.0, 0.0), v2(f64::INFINITY, 1.0), &r).is_none());
     }
 
     #[test]
