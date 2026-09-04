@@ -1,0 +1,39 @@
+[package]
+name = "opendxfviewer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.79"
+description = "A fast, open source DXF (CAD drawing) viewer built with Rust and Makepad"
+repository = "https://github.com/tonyhuang/opendxfviewer"
+license = "MIT"
+readme = "README.md"
+keywords = ["dxf", "cad", "viewer", "makepad", "autocad"]
+categories = ["graphics", "visualization"]
+exclude = ["tests/fixtures/large.dxf", "tools/"]
+
+[lib]
+name = "opendxfviewer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opendxfviewer"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = "1.0.0"
+dxf = "0.6.1"
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+
+[dev-dependencies]
+approx = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
