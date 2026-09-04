@@ -22,7 +22,7 @@ use dxf::{Block, Drawing, Point, Vector};
 use crate::aci;
 use crate::geom::{v2, v3, Aabb, Xform, V2, V3};
 use crate::scene::{
-    CurveSource, Dot, HAlign, Layer, Linetype, Poly, Rgb, Scene, Spline, Text, Tri, Units, VAlign,
+    CurveSource, Dot, HAlign, Layer, Linetype, Poly, Rgb, Scene, Text, Tri, Units, VAlign,
 };
 use crate::tessellate::{self as tess, Tol};
 
@@ -448,7 +448,7 @@ impl<'a> Ctx<'a> {
                 // The minor axis is the major rotated 90 degrees about the extrusion normal, so a
                 // -Z extrusion traces the arc the other way round, as it should.
                 let min3 = n.cross(maj3) * el.minor_axis_ratio.abs();
-                let center = inh.xform.apply(pt3(&el.center));
+                let center = inh.xform.apply(pt(&el.center));
                 let u = inh.xform.apply_dir(maj3.xy());
                 let v = inh.xform.apply_dir(min3.xy());
                 let (s, sweep) = tess::ellipse_sweep(el.start_parameter, el.end_parameter);
@@ -474,41 +474,44 @@ impl<'a> Ctx<'a> {
 
             // POINT carries an extrusion vector, but only to orient the marker glyph: its
             // location is in WCS, not in the plane the extrusion defines.
-            EntityType::ModelPoint(p) => self.push_dot(inh.xform.apply(pt3(&p.location)), st),
+            EntityType::ModelPoint(p) => self.push_dot(inh.xform.apply(pt(&p.location)), st),
 
             EntityType::Insert(i) => self.insert(i, e, inh, st),
 
+            // SOLID and TRACE store their last two corners in the opposite order to the one they
+            // are drawn in, so the quad is 1-2-4-3. They are otherwise the same entity.
             EntityType::Solid(s) => {
                 let x = ocs(&s.extrusion_direction, e.common.elevation).then(&inh.xform);
-                // SOLID and TRACE store their last two corners in the opposite order to the one
-                // they are drawn in, so the quad is 1-2-4-3, not 1-2-3-4.
+                let c = [&s.first_corner, &s.second_corner, &s.fourth_corner, &s.third_corner];
                 self.quad(
-                    x.apply(pt(&s.first_corner)),
-                    x.apply(pt(&s.second_corner)),
-                    x.apply(pt(&s.fourth_corner)),
-                    x.apply(pt(&s.third_corner)),
+                    x.apply(pt(c[0])),
+                    x.apply(pt(c[1])),
+                    x.apply(pt(c[2])),
+                    x.apply(pt(c[3])),
                     st,
                 );
             }
-
             EntityType::Trace(s) => {
                 let x = ocs(&s.extrusion_direction, e.common.elevation).then(&inh.xform);
+                let c = [&s.first_corner, &s.second_corner, &s.fourth_corner, &s.third_corner];
                 self.quad(
-                    x.apply(pt(&s.first_corner)),
-                    x.apply(pt(&s.second_corner)),
-                    x.apply(pt(&s.fourth_corner)),
-                    x.apply(pt(&s.third_corner)),
+                    x.apply(pt(c[0])),
+                    x.apply(pt(c[1])),
+                    x.apply(pt(c[2])),
+                    x.apply(pt(c[3])),
                     st,
                 );
             }
 
+            // 3DFACE is in WCS and its corners are already in draw order.
             EntityType::Face3D(f) => {
                 let x = &inh.xform;
+                let c = [&f.first_corner, &f.second_corner, &f.third_corner, &f.fourth_corner];
                 self.quad(
-                    x.apply(pt3(&f.first_corner)),
-                    x.apply(pt3(&f.second_corner)),
-                    x.apply(pt3(&f.third_corner)),
-                    x.apply(pt3(&f.fourth_corner)),
+                    x.apply(pt(c[0])),
+                    x.apply(pt(c[1])),
+                    x.apply(pt(c[2])),
+                    x.apply(pt(c[3])),
                     st,
                 );
             }
@@ -533,16 +536,16 @@ impl<'a> Ctx<'a> {
             EntityType::MText(m) => self.mtext(m, inh, st),
 
             EntityType::Leader(l) => {
-                let pts: Vec<V2> = l.vertices.iter().map(|p| inh.xform.apply(pt3(p))).collect();
+                let pts: Vec<V2> = l.vertices.iter().map(|p| inh.xform.apply(pt(p))).collect();
                 self.push_poly(pts, false, st, CurveSource::None);
             }
 
             EntityType::MLine(m) => {
                 // Without the MLINESTYLE table we cannot offset the individual elements; the
                 // centreline is the honest approximation.
-                let mut pts: Vec<V2> = m.vertices.iter().map(|p| inh.xform.apply(pt3(p))).collect();
+                let mut pts: Vec<V2> = m.vertices.iter().map(|p| inh.xform.apply(pt(p))).collect();
                 if pts.is_empty() {
-                    pts.push(inh.xform.apply(pt3(&m.start_point)));
+                    pts.push(inh.xform.apply(pt(&m.start_point)));
                 }
                 self.push_poly(pts, m.flags & 2 != 0, st, CurveSource::None);
                 self.note_partial("MLINE (drawn as its centreline)");
@@ -551,12 +554,12 @@ impl<'a> Ctx<'a> {
             // RAY and XLINE are unbounded. Clip them to a generous multiple of the drawing so they
             // read as construction lines without dominating the extent used for zoom-to-fit.
             EntityType::Ray(r) => {
-                let o = inh.xform.apply(pt3(&r.start_point));
+                let o = inh.xform.apply(pt(&r.start_point));
                 let d = inh.xform.apply_dir(vec3(&r.unit_direction_vector).xy()).norm();
                 self.push_unbounded(vec![o, o + d * RAY_LENGTH], st);
             }
             EntityType::XLine(r) => {
-                let o = inh.xform.apply(pt3(&r.first_point));
+                let o = inh.xform.apply(pt(&r.first_point));
                 let d = inh.xform.apply_dir(vec3(&r.unit_direction_vector).xy()).norm();
                 self.push_unbounded(vec![o - d * RAY_LENGTH, o + d * RAY_LENGTH], st);
             }
@@ -679,13 +682,13 @@ impl<'a> Ctx<'a> {
         if p.is_polyface_mesh() || p.is_3d_polygon_mesh() {
             // Meshes need face indices we do not reconstruct; draw the vertex ring so the shape is
             // at least visible, and say so.
-            let pts: Vec<V2> = p.vertices().map(|v| inh.xform.apply(pt3(&v.location))).collect();
+            let pts: Vec<V2> = p.vertices().map(|v| inh.xform.apply(pt(&v.location))).collect();
             self.push_poly(pts, false, st, CurveSource::None);
             self.note_partial("POLYLINE mesh (drawn as a vertex ring)");
             return;
         }
         if p.is_3d_polyline() {
-            let pts: Vec<V2> = p.vertices().map(|v| inh.xform.apply(pt3(&v.location))).collect();
+            let pts: Vec<V2> = p.vertices().map(|v| inh.xform.apply(pt(&v.location))).collect();
             self.push_poly(pts, p.is_closed(), st, CurveSource::None);
             return;
         }
@@ -703,8 +706,8 @@ impl<'a> Ctx<'a> {
 
     fn spline(&mut self, s: &dxf::entities::Spline, inh: &Inherit, st: Style, q: f64) {
         let closed = s.flags & 1 != 0;
-        let ctrl: Vec<V2> = s.control_points.iter().map(|p| inh.xform.apply(pt3(p))).collect();
-        let fit: Vec<V2> = s.fit_points.iter().map(|p| inh.xform.apply(pt3(p))).collect();
+        let ctrl: Vec<V2> = s.control_points.iter().map(|p| inh.xform.apply(pt(p))).collect();
+        let fit: Vec<V2> = s.fit_points.iter().map(|p| inh.xform.apply(pt(p))).collect();
         let extent = tess::bounds(if ctrl.is_empty() { &fit } else { &ctrl });
         let size = extent.size();
         let tol = Tol::new(size.x.max(size.y).max(f64::MIN_POSITIVE) * q).with_max(2048);
@@ -722,13 +725,7 @@ impl<'a> Ctx<'a> {
                 Some(n) => {
                     tess::flatten_nurbs(&n, tol, &mut out);
                     let idx = self.scene.splines.len() as u32;
-                    self.scene.splines.push(Spline {
-                        degree: n.degree,
-                        ctrl: n.ctrl,
-                        knots: n.knots,
-                        weights: n.weights,
-                        closed,
-                    });
+                    self.scene.splines.push(n);
                     self.push_poly(out, closed, st, CurveSource::Spline { index: idx });
                     return;
                 }
@@ -798,7 +795,7 @@ impl<'a> Ctx<'a> {
             return;
         }
         let rot = i.rotation.to_radians();
-        let base = pt3(&block.base_point);
+        let base = pt(&block.base_point);
 
         let cols = i.column_count.max(1) as i32;
         let rows = i.row_count.max(1) as i32;
@@ -854,7 +851,6 @@ impl<'a> Ctx<'a> {
             r.height,
             r.rotation.to_radians(),
             r.width_factor,
-            r.oblique.to_radians(),
             halign(r.halign),
             valign_for(r.halign, r.valign),
             x,
@@ -870,7 +866,6 @@ impl<'a> Ctx<'a> {
         height: f64,
         rotation: f64,
         width_factor: f64,
-        oblique: f64,
         halign: HAlign,
         valign: VAlign,
         x: &Xform,
@@ -896,7 +891,6 @@ impl<'a> Ctx<'a> {
             height,
             rotation,
             width_factor,
-            oblique: if oblique.is_finite() { oblique } else { 0.0 },
             halign,
             valign,
             layer: st.layer,
@@ -921,7 +915,7 @@ impl<'a> Ctx<'a> {
         let xdir = vec3(&m.x_axis_direction).xy();
         let rot = if xdir.len() > 1e-12 { xdir.angle() } else { m.rotation_angle.to_radians() };
         let (ha, va) = attachment(m.attachment_point);
-        let pos = x.apply(pt3(&m.insertion_point));
+        let pos = x.apply(pt(&m.insertion_point));
 
         // Lines run down the page from the attachment point, perpendicular to the baseline.
         let line_h = h * MTEXT_LINE_SPACING;
@@ -934,7 +928,7 @@ impl<'a> Ctx<'a> {
         };
         for (i, line) in lines.iter().enumerate() {
             let o = first_offset + line_h * i as f64;
-            self.text(line, pos + down * (o + h), h, rot, 1.0, 0.0, ha, VAlign::Baseline, &x, st);
+            self.text(line, pos + down * (o + h), h, rot, 1.0, ha, VAlign::Baseline, &x, st);
         }
     }
 }
@@ -958,7 +952,6 @@ struct TextRun<'a> {
     height: f64,
     rotation: f64,
     width_factor: f64,
-    oblique: f64,
     halign: HorizontalTextJustification,
     valign: VerticalTextJustification,
 }
@@ -972,7 +965,6 @@ impl<'a> TextRun<'a> {
             height: t.text_height,
             rotation: t.rotation,
             width_factor: t.relative_x_scale_factor,
-            oblique: t.oblique_angle,
             halign: t.horizontal_text_justification,
             valign: t.vertical_text_justification,
         }
@@ -986,7 +978,6 @@ impl<'a> TextRun<'a> {
             height: a.text_height,
             rotation: a.rotation,
             width_factor: a.relative_x_scale_factor,
-            oblique: a.oblique_angle,
             halign: a.horizontal_text_justification,
             valign: a.vertical_text_justification,
         }
@@ -1002,10 +993,8 @@ struct Style {
     linetype_scale: f32,
 }
 
+/// Project a DXF point into the top-down view by dropping its Z.
 fn pt(p: &Point) -> V2 {
-    v2(p.x, p.y)
-}
-fn pt3(p: &Point) -> V2 {
     v2(p.x, p.y)
 }
 fn vec3(v: &Vector) -> V3 {

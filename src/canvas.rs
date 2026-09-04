@@ -118,28 +118,39 @@ pub struct DrawSeg {
     pub color: Vec4,
 }
 
-/// `derive(LiveHook)` would produce an empty impl, leaving `draw_vars.draw_shader` unset. Nothing
-/// would render and nothing would be logged, so both hooks have to be written by hand.
-impl LiveHook for DrawSeg {
-    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        self.draw_super.draw_vars.before_apply_init_shader(
-            cx,
-            apply,
-            index,
-            nodes,
-            &self.draw_super.geometry,
-        );
-    }
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        self.draw_super.draw_vars.after_apply_update_self(
-            cx,
-            apply,
-            index,
-            nodes,
-            &self.draw_super.geometry,
-        );
-    }
+/// Initialise a `DrawQuad`-derived shader's `DrawVars` on apply.
+///
+/// `derive(LiveHook)` produces an *empty* impl, which leaves `draw_vars.draw_shader` as `None`:
+/// nothing renders and nothing is logged. Every shader struct here needs these two hooks, and they
+/// are identical for all of them.
+macro_rules! impl_draw_quad_live_hook {
+    ($ty:ty) => {
+        impl LiveHook for $ty {
+            fn before_apply(
+                &mut self,
+                cx: &mut Cx,
+                apply: &mut Apply,
+                index: usize,
+                nodes: &[LiveNode],
+            ) {
+                let geom = &self.draw_super.geometry;
+                self.draw_super.draw_vars.before_apply_init_shader(cx, apply, index, nodes, geom);
+            }
+            fn after_apply(
+                &mut self,
+                cx: &mut Cx,
+                apply: &mut Apply,
+                index: usize,
+                nodes: &[LiveNode],
+            ) {
+                let geom = &self.draw_super.geometry;
+                self.draw_super.draw_vars.after_apply_update_self(cx, apply, index, nodes, geom);
+            }
+        }
+    };
 }
+
+impl_draw_quad_live_hook!(DrawSeg);
 
 /// One instanced filled triangle.
 #[derive(Live, LiveRegister)]
@@ -157,26 +168,7 @@ pub struct DrawTri {
     pub color: Vec4,
 }
 
-impl LiveHook for DrawTri {
-    fn before_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        self.draw_super.draw_vars.before_apply_init_shader(
-            cx,
-            apply,
-            index,
-            nodes,
-            &self.draw_super.geometry,
-        );
-    }
-    fn after_apply(&mut self, cx: &mut Cx, apply: &mut Apply, index: usize, nodes: &[LiveNode]) {
-        self.draw_super.draw_vars.after_apply_update_self(
-            cx,
-            apply,
-            index,
-            nodes,
-            &self.draw_super.geometry,
-        );
-    }
-}
+impl_draw_quad_live_hook!(DrawTri);
 
 /// What the canvas tells the app about.
 #[derive(Clone, Debug, DefaultNone)]
@@ -185,8 +177,6 @@ pub enum DxfCanvasAction {
     ViewChanged,
     /// The pointer moved to this world position.
     Hover(V2),
-    /// The user dropped files onto the canvas.
-    OpenFiles(Vec<String>),
     None,
 }
 
@@ -275,14 +265,6 @@ impl DxfCanvas {
     pub fn show_all_layers(&mut self, cx: &mut Cx) {
         for l in &mut self.scene.layers {
             l.visible = true;
-        }
-        self.redraw(cx);
-    }
-
-    /// Hide every layer but one.
-    pub fn isolate_layer(&mut self, cx: &mut Cx, layer: usize) {
-        for (i, l) in self.scene.layers.iter_mut().enumerate() {
-            l.visible = i == layer;
         }
         self.redraw(cx);
     }

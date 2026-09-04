@@ -85,8 +85,6 @@ pub struct LayerList(pub Vec<LayerItem>);
 pub enum LayerPanelAction {
     /// One layer's checkbox changed.
     SetVisible(usize, bool),
-    /// Alt-click on a row: show only that layer.
-    Isolate(usize),
     ShowAll,
     None,
 }

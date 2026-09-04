@@ -218,7 +218,7 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
                 let hw = half_width(style, p.lineweight, scene, p.layer);
                 let dash = dash_pattern(scene, p, cam, style);
                 buf.clear();
-                let pts = refined(scene, idx as usize, cam, style, &mut buf);
+                let pts = refined(scene, idx as usize, cam, &mut buf);
                 // Nothing wider than a pixel apart can be told apart on screen, so skip vertices
                 // rather than transforming every one of a curve stored for a closer view.
                 let stride = stride_for(pts.len(), s.x.max(s.y));
@@ -293,13 +293,7 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
 ///
 /// Returns either the stored vertices or a freshly built buffer, so the caller keeps one scratch
 /// allocation across the whole frame.
-fn refined<'a>(
-    scene: &'a Scene,
-    idx: usize,
-    cam: &Camera,
-    style: &Style,
-    buf: &'a mut Vec<V2>,
-) -> &'a [V2] {
+fn refined<'a>(scene: &'a Scene, idx: usize, cam: &Camera, buf: &'a mut Vec<V2>) -> &'a [V2] {
     let p = &scene.polys[idx];
     let stored = &scene.verts[p.start as usize..(p.start + p.len) as usize];
     // Chord error is a world-space quantity; on screen it is that times the zoom.
@@ -333,14 +327,9 @@ fn refined<'a>(
             if sb.x.max(sb.y) < stored.len() as f64 * 3.0 {
                 return stored;
             }
-            let n = tess::Nurbs {
-                degree: s.degree,
-                ctrl: s.ctrl.clone(),
-                knots: s.knots.clone(),
-                weights: s.weights.clone(),
-            };
-            tess::flatten_nurbs(&n, tol.with_max(2048), buf);
-            let _ = style;
+            // Borrowed, not cloned: this runs for every visible spline on every redraw, and
+            // copying three Vecs per curve per frame was the whole cost of the branch.
+            tess::flatten_nurbs(s, tol.with_max(2048), buf);
             buf
         }
     }
@@ -674,14 +663,14 @@ mod tests {
         cam.center = s.polys[idx].bbox.center();
         cam.scale = 4000.0; // the circle is now far wider than the window
         let mut buf = Vec::new();
-        let pts = refined(&s, idx, &cam, &Style::default(), &mut buf);
+        let pts = refined(&s, idx, &cam, &mut buf);
         assert!(pts.len() > stored * 4, "expected refinement past {stored}, got {}", pts.len());
 
         // Zoomed out, the stored tessellation already carries more detail than the view can show,
         // so nothing is rebuilt and the stored vertices are handed back untouched.
         let mut buf = Vec::new();
         let far = Camera { scale: 0.05, ..cam };
-        let pts = refined(&s, idx, &far, &Style::default(), &mut buf);
+        let pts = refined(&s, idx, &far, &mut buf);
         assert_eq!(pts.len(), stored);
         assert!(buf.is_empty(), "the scratch buffer should not have been touched");
     }
@@ -804,7 +793,6 @@ mod tests {
             height: 10.0,
             rotation: 0.5,
             width_factor: 1.0,
-            oblique: 0.0,
             halign: HAlign::Left,
             valign: VAlign::Baseline,
             layer: 0,

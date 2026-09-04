@@ -106,26 +106,14 @@ pub struct Text {
     pub height: f64,
     /// Baseline direction, in radians CCW from +X.
     pub rotation: f64,
-    /// Horizontal stretch applied to glyph advances (DXF group 41).
+    /// Horizontal stretch applied to glyph advances (DXF group 41). Used for the run's extent,
+    /// which is what culling and zoom-to-fit need; the renderer cannot stretch glyphs.
     pub width_factor: f64,
-    /// Italic slant in radians (DXF group 51).
-    pub oblique: f64,
     pub halign: HAlign,
     pub valign: VAlign,
     pub layer: u16,
     pub color: Rgb,
     pub bbox: Aabb,
-}
-
-/// A NURBS definition retained for on-demand refinement.
-#[derive(Clone, Debug)]
-pub struct Spline {
-    pub degree: usize,
-    pub ctrl: Vec<V2>,
-    pub knots: Vec<f64>,
-    /// Empty when the spline is non-rational.
-    pub weights: Vec<f64>,
-    pub closed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -239,7 +227,8 @@ pub struct Scene {
     pub dots: Vec<Dot>,
     pub tris: Vec<Tri>,
     pub texts: Vec<Text>,
-    pub splines: Vec<Spline>,
+    /// NURBS definitions retained so a curve can be re-tessellated when the view zooms in.
+    pub splines: Vec<crate::tessellate::Nurbs>,
     pub layers: Vec<Layer>,
     pub linetypes: Vec<Linetype>,
     pub bounds: Aabb,

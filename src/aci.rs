@@ -103,42 +103,6 @@ pub fn rgb(index: i16, dark_background: bool) -> Rgb {
     }
 }
 
-/// True when the layer's stored colour index marks the layer as switched off.
-///
-/// DXF encodes "layer off" by negating the colour index rather than with a flag.
-pub fn layer_is_off(index: i16) -> bool {
-    index < 0
-}
-
-/// Nudge a colour that would be invisible against the background.
-///
-/// Drawings authored for a black background routinely use near-black greys that disappear on a
-/// white one (and vice versa). Rather than repaint everything, only pull colours that fall below a
-/// contrast floor back toward the foreground.
-pub fn ensure_contrast(c: Rgb, dark_background: bool) -> Rgb {
-    const FLOOR: f32 = 0.18;
-    let l = c.luma();
-    if dark_background {
-        if l >= FLOOR {
-            return c;
-        }
-        // Lift toward white, preserving hue.
-        let t = (FLOOR - l) / FLOOR.max(f32::EPSILON);
-        mix(c, Rgb::WHITE, t.clamp(0.0, 1.0) * 0.85)
-    } else {
-        if l <= 1.0 - FLOOR {
-            return c;
-        }
-        let t = (l - (1.0 - FLOOR)) / FLOOR.max(f32::EPSILON);
-        mix(c, Rgb::BLACK, t.clamp(0.0, 1.0) * 0.85)
-    }
-}
-
-fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
-    Rgb(f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,40 +157,9 @@ mod tests {
     }
 
     #[test]
-    fn negative_indices_mean_a_layer_that_is_off() {
-        assert!(layer_is_off(-5));
-        assert!(!layer_is_off(5));
-        assert!(!layer_is_off(0));
-        // The colour itself is still recoverable.
+    fn a_negated_index_still_yields_its_colour() {
+        // DXF switches a layer off by negating its colour index; the colour itself survives.
         assert_eq!(rgb(-5, true), PALETTE[5]);
-    }
-
-    #[test]
-    fn contrast_rescues_invisible_colours_and_leaves_others_alone() {
-        // Near-black on a dark background gets lifted.
-        let dark = Rgb(0x13, 0x00, 0x00);
-        assert!(ensure_contrast(dark, true).luma() > dark.luma());
-        // A bright colour on a dark background is untouched.
-        assert_eq!(ensure_contrast(Rgb(0xFF, 0x00, 0x00), true), Rgb(0xFF, 0x00, 0x00));
-        // Near-white on a light background gets darkened.
-        let pale = Rgb(0xFF, 0xFF, 0xE0);
-        assert!(ensure_contrast(pale, false).luma() < pale.luma());
-        assert_eq!(ensure_contrast(Rgb(0x00, 0x00, 0xFF), false), Rgb(0x00, 0x00, 0xFF));
-    }
-
-    #[test]
-    fn every_palette_entry_survives_a_contrast_pass() {
-        for &dark in &[true, false] {
-            for c in PALETTE {
-                let out = ensure_contrast(c, dark);
-                let floor = 0.18;
-                if dark {
-                    assert!(out.luma() >= c.luma() - 1e-6);
-                } else {
-                    assert!(out.luma() <= c.luma() + 1e-6);
-                }
-                let _ = floor;
-            }
-        }
+        assert_eq!(rgb(-255, true), PALETTE[255]);
     }
 }

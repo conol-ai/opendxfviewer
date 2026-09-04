@@ -341,11 +341,6 @@ impl MatchEvent for App {
                     self.ui.label(id!(coords_label)).set_text(cx, &txt);
                 }
                 DxfCanvasAction::ViewChanged => self.refresh_status(cx),
-                DxfCanvasAction::OpenFiles(paths) => {
-                    if let Some(p) = paths.first() {
-                        self.open(cx, PathBuf::from(p));
-                    }
-                }
                 DxfCanvasAction::None => {}
             }
             match a.cast::<LayerPanelAction>() {
@@ -354,13 +349,6 @@ impl MatchEvent for App {
                         l.visible = on;
                     }
                     self.with_canvas(cx, |c, cx| c.set_layer_visible(cx, row, on));
-                }
-                LayerPanelAction::Isolate(row) => {
-                    for (i, l) in self.layer_list.0.iter_mut().enumerate() {
-                        l.visible = i == row;
-                    }
-                    self.with_canvas(cx, |c, cx| c.isolate_layer(cx, row));
-                    self.ui.redraw(cx);
                 }
                 LayerPanelAction::ShowAll => {
                     for l in &mut self.layer_list.0 {

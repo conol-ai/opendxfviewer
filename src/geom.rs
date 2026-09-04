@@ -56,18 +56,11 @@ impl V2 {
     pub fn from_angle(a: f64) -> V2 {
         v2(a.cos(), a.sin())
     }
-    pub fn rotate(self, a: f64) -> V2 {
-        let (s, c) = a.sin_cos();
-        v2(self.x * c - self.y * s, self.x * s + self.y * c)
-    }
     pub fn min(self, o: V2) -> V2 {
         v2(self.x.min(o.x), self.y.min(o.y))
     }
     pub fn max(self, o: V2) -> V2 {
         v2(self.x.max(o.x), self.y.max(o.y))
-    }
-    pub fn lerp(self, o: V2, t: f64) -> V2 {
-        self + (o - self) * t
     }
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite()
@@ -122,7 +115,6 @@ pub const fn v3(x: f64, y: f64, z: f64) -> V3 {
 }
 
 impl V3 {
-    pub const ZERO: V3 = v3(0.0, 0.0, 0.0);
     pub const Z: V3 = v3(0.0, 0.0, 1.0);
 
     pub fn dot(self, o: V3) -> f64 {
@@ -148,12 +140,6 @@ impl V3 {
     }
 }
 
-impl Add for V3 {
-    type Output = V3;
-    fn add(self, o: V3) -> V3 {
-        v3(self.x + o.x, self.y + o.y, self.z + o.z)
-    }
-}
 impl Sub for V3 {
     type Output = V3;
     fn sub(self, o: V3) -> V3 {
@@ -210,7 +196,7 @@ impl Xform {
         self.a * d.x + self.b * d.y
     }
 
-    /// `self ∘ rhs` — applies `rhs` first, then `self`.
+    /// Compose: the result applies `self` first, then `outer`.
     pub fn then(&self, outer: &Xform) -> Xform {
         Xform { a: outer.apply_dir(self.a), b: outer.apply_dir(self.b), c: outer.apply(self.c) }
     }
