@@ -106,8 +106,11 @@ These DXF details are handled once, at load, so the renderer never sees them:
 A viewer opens files it did not write, so malformed and deliberately hostile
 DXF is a normal case rather than an edge case. Blocks that reference themselves
 or each other are detected and reported; nesting stops at a depth limit;
-conversion stops at a primitive and a vertex budget, both of which are latched
-so a runaway block array stops *working*, not merely stops emitting. Angles of
+conversion stops at a primitive, a vertex and a block-array-cell budget, all
+latched so a runaway array stops *working*, not merely stops emitting. The cell
+budget is separate because a block can expand to *nothing* — an empty block, a
+zero-radius circle — and then no counter that measures output ever moves,
+however many cells are laid out. Angles of
 infinity, coordinates that overflow when subtracted, splines whose declared
 degree exceeds their control points, and drawings with more layers than the
 layer id can address are all handled rather than crashing or hanging. A 30000 x
@@ -153,7 +156,7 @@ carry coordinates in the millions, where `f32` quantises to centimetres.
 ## Building
 
 ```sh
-cargo test            # 168 tests, no GPU needed
+cargo test            # 170 tests, no GPU needed
 cargo clippy --all-targets -- -D warnings
 cargo run --release -- tests/fixtures/basic.dxf
 ```

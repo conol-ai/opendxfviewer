@@ -46,6 +46,13 @@ pub struct Options {
     ///
     /// DXF palettes assume a black sheet, so yellow and green all but vanish on a white one.
     pub adjust_contrast: bool,
+    /// Block-array cells that may be expanded in total.
+    ///
+    /// Separate from the primitive and vertex budgets because a block can expand to *nothing* —
+    /// an empty block, a zero-radius circle, an unsupported entity — and then neither of those
+    /// counters moves however many cells are laid out. `column_count` and `row_count` are `i16`,
+    /// so a single MINSERT can ask for 32767 x 32767 cells and a nested one for 1e18.
+    pub max_block_cells: u64,
     /// Total vertices after which conversion stops.
     ///
     /// Primitives alone do not bound memory: a MINSERT array of a block full of circles produces
@@ -65,6 +72,7 @@ impl Default for Options {
             // roughly an order of magnitude of headroom over anything real.
             max_primitives: 2_000_000,
             max_vertices: 20_000_000,
+            max_block_cells: 4_000_000,
         }
     }
 }
@@ -107,6 +115,8 @@ struct Ctx<'a> {
     active: HashSet<String>,
     scene: Scene,
     unsupported: BTreeMap<&'static str, usize>,
+    /// Block-array cells expanded so far, across every INSERT and every nesting level.
+    cells: u64,
     warned_missing: HashSet<String>,
     truncated: bool,
 }
@@ -205,6 +215,7 @@ impl<'a> Ctx<'a> {
             active: HashSet::new(),
             scene,
             unsupported: BTreeMap::new(),
+            cells: 0,
             warned_missing: HashSet::new(),
             truncated: false,
         }
@@ -352,6 +363,7 @@ impl<'a> Ctx<'a> {
         self.truncated
             || self.scene.stats.primitives >= self.opts.max_primitives
             || self.scene.verts.len() >= self.opts.max_vertices
+            || self.cells >= self.opts.max_block_cells
     }
 
     // -- emitters -------------------------------------------------------------------------
@@ -819,16 +831,28 @@ impl<'a> Ctx<'a> {
         let rot = i.rotation.to_radians();
         let base = pt(&block.base_point);
 
-        let cols = i.column_count.max(1) as i32;
-        let rows = i.row_count.max(1) as i32;
+        let cols = i.column_count.max(1) as i64;
+        let rows = i.row_count.max(1) as i64;
+        let asked = (cols as u64).saturating_mul(rows as u64);
+        if asked > self.opts.max_block_cells {
+            self.warn(format!(
+                "Block \"{}\" asks for {asked} array cells; only the first {} are drawn.",
+                i.name, self.opts.max_block_cells
+            ));
+        }
         // MINSERT lays its copies out along the insert's rotated axes, not the world axes.
         let step = Xform::rotate(rot);
 
-        for row in 0..rows {
+        'cells: for row in 0..rows {
             for col in 0..cols {
+                // Every cell costs budget, whether or not it draws anything. Charging only for
+                // what it produces lets an array of a block that draws nothing — an empty block,
+                // a zero-radius circle, an unsupported entity — run all 1e9 of its cells.
+                self.cells += 1;
+                // `break` alone would leave the outer loop spinning `row_count` more times.
                 if self.full() {
                     self.truncated = true;
-                    break;
+                    break 'cells;
                 }
                 let offset =
                     step.apply_dir(v2(col as f64 * i.column_spacing, row as f64 * i.row_spacing));
@@ -2035,6 +2059,52 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "conversion kept working after the budget ran out"
+        );
+    }
+
+    #[test]
+    fn an_array_of_a_block_that_draws_nothing_still_terminates() {
+        // The primitive and vertex budgets only move when something is drawn, so a block that
+        // produces nothing — an empty block, a zero-radius circle, an unsupported entity — used
+        // to lay out all 32767 x 32767 of its cells. A 833-byte file took ten seconds; nesting
+        // two of them never returned at all.
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        let mut nop = dxf::Block { name: "NOP".into(), ..Default::default() };
+        nop.entities.push(Entity::new(EntityType::Circle(Circle {
+            radius: 0.0, // draws nothing
+            ..Default::default()
+        })));
+        dr.add_block(nop);
+        dr.add_entity(Entity::new(EntityType::Insert(Insert {
+            name: "NOP".into(),
+            column_count: i16::MAX,
+            row_count: i16::MAX,
+            column_spacing: 1.0,
+            row_spacing: 1.0,
+            ..Default::default()
+        })));
+
+        let started = std::time::Instant::now();
+        let s = convert(&dr, &Options::default());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a 1e9-cell array of an empty block did not terminate promptly"
+        );
+        assert!(s.is_empty(), "a zero-radius circle should draw nothing");
+    }
+
+    #[test]
+    fn a_large_array_still_draws_what_it_can() {
+        // The cell budget must not be so blunt that an oversized array draws nothing at all.
+        let dr = array_bomb(1, 3000, 3000);
+        let s = convert(&dr, &Options { max_block_cells: 10_000, ..Options::default() });
+        assert!(s.polys.len() >= 9_000, "only {} of the budget was used", s.polys.len());
+        assert!(s.polys.len() <= 10_001, "{} exceeds the cell budget", s.polys.len());
+        assert!(
+            s.stats.warnings.iter().any(|w| w.contains("array cells")),
+            "the user should be told it was cut short: {:?}",
+            s.stats.warnings
         );
     }
 
