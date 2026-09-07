@@ -88,8 +88,8 @@ widget's top level, not `walk: { width: Fill }`.
 
 `#[derive(LiveHook)]` generates an *empty* impl. A struct with `#[deref] draw_vars: DrawVars` needs
 `before_apply` / `after_apply` to initialise its shader; without them `draw_vars.draw_shader` stays
-`None`, nothing draws, and **nothing is logged**. Both `DrawSeg` and `DrawTri` write them by hand —
-see `canvas.rs`.
+`None`, nothing draws, and **nothing is logged**. `canvas.rs` supplies them through the
+`impl_draw_quad_live_hook!` macro, since they are identical for every `DrawQuad`-derived shader.
 
 ## Uniforms are declared in the DSL, instances are struct fields
 
@@ -109,6 +109,14 @@ scatter dominates the frame.
 
 `canvas.rs` calls `cx.begin_many_instances(&draw_vars)` (reached through `Deref` on `Cx2d`) and
 sets `draw_clip` itself, once, before the loop.
+
+## How many floats an instance takes is a runtime answer
+
+`DrawVars::as_slice()` returns `var_instance_slots` floats, a count the shader mapping computes
+when the shader is applied — not something the struct definition tells you directly. Hardcoding it
+to size a `reserve()` works until someone adds a field, at which point the reserve is quietly wrong
+while the output stays correct, so nothing catches it. Ask the instance:
+`self.draw_seg.draw_super.draw_vars.as_slice().len()`.
 
 ## Makepad is retained-mode
 
