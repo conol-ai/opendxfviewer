@@ -19,10 +19,17 @@ live_design! {
         padding: { left: 8.0, right: 8.0 }
 
         vis = <CheckBox> { width: Fit, text: "" }
+        // The swatch shows the colour as it will appear on the sheet, which on a light sheet can
+        // be dark. The border keeps it visible against this panel either way.
         swatch = <RoundedView> {
             width: 11.0, height: 11.0,
             show_bg: true,
-            draw_bg: { color: #fff, border_radius: 2.0 }
+            draw_bg: {
+                color: #fff,
+                border_radius: 2.0,
+                border_size: 1.0,
+                border_color: #5a5a62
+            }
         }
         name = <Label> {
             width: Fill,
