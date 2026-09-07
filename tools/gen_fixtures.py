@@ -375,6 +375,13 @@ def f_ocs():
     d.add(circle(0, 0, 25, color=5, normal=(1.0, 0.0, 0.0)))
     d.add(lwpoly([(0, 0), (40, 0), (40, 40)], color=6, normal=(0, 0, -1)))
     d.add(lwpoly([(0, 0), (30, 0), (30, 30)], color=2, elev=10.0, normal=(0, 0, 1)))
+    # A bulged polyline under a -Z extrusion. A mirror reverses the sweep, so a reader that
+    # ignores the sign puts the arc on the wrong side of its chord.
+    d.add(chunk((0, "LWPOLYLINE"), (8, "0"), (62, 3), (90, 2), (70, 0),
+                (10, -60.0), (20, -60.0), (42, 1.0), (10, -20.0), (20, -60.0),
+                (210, 0.0), (220, 0.0), (230, -1.0)))
+    # The same polyline with a +Z extrusion, as the control. The two must bow opposite ways.
+    d.add(lwpoly([(20, -100, 1.0), (60, -100, 0)], closed=False, color=4))
     # 3D geometry
     d.add(line(0, 0, 50, 50, z1=0.0, z2=40.0))
     d.add(face3d([(0, 0, 0), (40, 0, 0), (40, 40, 20), (0, 40, 20)], color=4))
@@ -436,6 +443,9 @@ def f_annotation():
     d.add(insert("PART", 80, 0, layer="TAGS"))              # no attributes at all
     # Control codes in plain TEXT, and the justification that centres in both directions.
     d.add(text(0, 20, 4, "%%c44 %%p0.1 45%%d", layer="0", color=1))
+    # A 24-bit true colour (group 420), which overrides the palette index entirely.
+    d.add(chunk((0, "LINE"), (8, "0"), (62, 1), (420, (0x33 << 16) | (0x99 << 8) | 0xCC),
+                (10, 0.0), (20, 40.0), (30, 0.0), (11, 60.0), (21, 40.0), (31, 0.0)))
     d.add(text(0, 30, 4, "middle", halign=4, valign=0, x2=0.0, y2=30.0, layer="0", color=5))
     # Construction lines: infinite, and must not drag the drawing extent out with them.
     d.add(ray(0, 0, 1.0, 1.0, layer="CONSTRUCTION"))

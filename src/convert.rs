@@ -2260,6 +2260,113 @@ mod tests {
     }
 
     #[test]
+    fn a_true_colour_overrides_the_palette_index() {
+        // Group 420 is what the author actually picked, so it wins over group 62 — and, unlike a
+        // palette colour, it is used exactly as written rather than adjusted for the background.
+        let s = load("annotation.dxf");
+        let p = s
+            .polys
+            .iter()
+            .find(|p| p.color == Rgb(0x33, 0x99, 0xCC))
+            .expect("the true-colour line");
+        assert_eq!(p.color, Rgb(0x33, 0x99, 0xCC));
+        // Its group 62 says ACI 1 (red); the true colour must have taken precedence.
+        assert_ne!(p.color, aci::PALETTE[1]);
+    }
+
+    #[test]
+    fn a_bulge_keeps_its_side_of_the_chord_under_a_mirror() {
+        // A mirror reverses both the sweep and the chord direction, and the two cancel: the
+        // arc's image stays on the same side. Ignoring the sign breaks the cancellation and puts
+        // the arc on the wrong side — a fillet bulging into the part instead of out of it.
+        let s = load("ocs_3d.dxf");
+        let p = s
+            .polys
+            .iter()
+            .find(|p| {
+                p.len > 4 && p.bbox.min.x >= 19.0 && p.bbox.max.x <= 61.0 && p.bbox.max.y < -55.0
+            })
+            .expect("the mirrored bulged polyline");
+        // A -Z extrusion negates x and leaves y alone, so the arc's image keeps bulging the same
+        // way in y — the reversed sweep and the reversed chord cancel. The fixture carries the
+        // same polyline under +Z as a control, and both must bow downward.
+        //
+        // That cancellation is exactly why the sign matters: drop it and the two halves stop
+        // cancelling, and the mirrored arc flips to the wrong side of its chord.
+        let control = s
+            .polys
+            .iter()
+            .find(|p| p.len > 4 && p.bbox.max.y < -95.0)
+            .expect("the unmirrored control polyline");
+        let bow = |p: &Poly, chord_y: f64| {
+            s.vertices(p).iter().map(|v| v.y - chord_y).fold(0.0f64, |a, d| {
+                if d.abs() > a.abs() {
+                    d
+                } else {
+                    a
+                }
+            })
+        };
+        let mirrored = bow(p, -60.0);
+        let plain = bow(control, -100.0);
+        assert!(mirrored.abs() > 1.0 && plain.abs() > 1.0, "a bulge flattened to a straight chord");
+        assert!(plain < 0.0, "the control arc should bow downward, got {plain}");
+        assert!(mirrored < 0.0, "the mirrored arc landed on the wrong side: {mirrored}");
+        // Both are semicircles on a 40-unit chord, so both reach 20 units from it.
+        assert!((mirrored.abs() - 20.0).abs() < 0.5, "mirrored apex {mirrored}");
+        assert!((plain.abs() - 20.0).abs() < 0.5, "control apex {plain}");
+    }
+
+    #[test]
+    fn a_light_background_resolves_colours_the_other_way() {
+        // Nothing exercised Options { dark_background: false }, so the whole light path — index 7
+        // resolving to black, and the contrast adjustment — could have been broken silently.
+        let path = format!("{}/tests/fixtures/showcase.dxf", env!("CARGO_MANIFEST_DIR"));
+        let dr = crate::read::load(&path).unwrap();
+        let dark = convert(&dr, &Options::default());
+        let light = convert(&dr, &Options { dark_background: false, ..Options::default() });
+
+        // Index 7 is the foreground and flips with the sheet.
+        let fg_dark = dark.layers.iter().find(|l| l.name == "OUTLINE").unwrap().color;
+        let fg_light = light.layers.iter().find(|l| l.name == "OUTLINE").unwrap().color;
+        assert_eq!(fg_dark, Rgb::WHITE);
+        assert_eq!(fg_light, Rgb::BLACK);
+
+        // And a bright palette colour is darkened for paper rather than left illegible.
+        let text_dark = dark.layers.iter().find(|l| l.name == "TEXT").unwrap().color;
+        let text_light = light.layers.iter().find(|l| l.name == "TEXT").unwrap().color;
+        assert_eq!(text_dark, aci::PALETTE[2], "yellow should be untouched on a dark sheet");
+        assert!(text_light.luma() < text_dark.luma() - 0.1, "yellow was left bright on paper");
+
+        // The geometry itself is identical either way; only the colours differ.
+        assert_eq!(dark.polys.len(), light.polys.len());
+        assert_eq!(dark.verts.len(), light.verts.len());
+    }
+
+    #[test]
+    fn a_linetype_is_resolved_from_the_file_not_defaulted() {
+        // Forcing every entity to CONTINUOUS used to change nothing any test could see.
+        let s = load("showcase.dxf");
+        let named = |n: &str| s.linetypes.iter().position(|l| l.name == n).map(|i| i as u16);
+        let dashed = named("DASHED").expect("the DASHED linetype from the table");
+        let center = named("CENTER").expect("the CENTER linetype from the table");
+        assert!(dashed != 0 && center != 0, "table linetypes must not collapse onto CONTINUOUS");
+
+        // The HIDDEN layer is DASHED and CENTRE is CENTER; entities on them inherit ByLayer.
+        let layer_of = |n: &str| s.layers.iter().position(|l| l.name == n).unwrap();
+        assert_eq!(s.layers[layer_of("HIDDEN")].linetype, dashed);
+        assert_eq!(s.layers[layer_of("CENTRE")].linetype, center);
+        let on = |l: usize| s.polys.iter().filter(|p| p.layer as usize == l).collect::<Vec<_>>();
+        assert!(!on(layer_of("HIDDEN")).is_empty());
+        for p in on(layer_of("HIDDEN")) {
+            assert_eq!(p.linetype, dashed, "a HIDDEN entity did not inherit its layer's linetype");
+        }
+        // And the patterns actually carry dash lengths, or nothing would ever draw broken.
+        assert!(!s.linetypes[dashed as usize].pattern.is_empty());
+        assert!(s.linetypes[dashed as usize].total > 0.0);
+    }
+
+    #[test]
     fn every_primitive_points_at_a_real_layer() {
         for f in
             ["basic.dxf", "polylines.dxf", "curves.dxf", "blocks.dxf", "text.dxf", "ocs_3d.dxf"]
