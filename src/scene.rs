@@ -314,3 +314,84 @@ impl Grid {
         self.items.is_empty() && self.large.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::v2;
+
+    fn poly(layer: u16, b: Aabb) -> Poly {
+        Poly {
+            start: 0,
+            len: 0,
+            layer,
+            color: Rgb::WHITE,
+            lineweight: None,
+            linetype: 0,
+            linetype_scale: 1.0,
+            closed: false,
+            unbounded: false,
+            bbox: b,
+            source: CurveSource::None,
+        }
+    }
+
+    fn layer(name: &str) -> Layer {
+        Layer {
+            name: name.into(),
+            color: Rgb::WHITE,
+            visible_in_file: true,
+            visible: true,
+            lineweight: None,
+            linetype: 0,
+            count: 1,
+        }
+    }
+
+    /// Two layers, one small and one far away, so hiding either changes the extent visibly.
+    fn two_layer_scene() -> Scene {
+        let mut s = Scene::default();
+        s.layers.push(layer("NEAR"));
+        s.layers.push(layer("FAR"));
+        s.polys.push(poly(0, Aabb::new(v2(0.0, 0.0), v2(10.0, 10.0))));
+        s.polys.push(poly(1, Aabb::new(v2(900.0, 900.0), v2(1000.0, 1000.0))));
+        s.bounds = s.polys[0].bbox.union(&s.polys[1].bbox);
+        s
+    }
+
+    #[test]
+    fn visible_bounds_follows_the_layer_panel() {
+        // This is what "Fit" frames, so hiding a layer has to shrink it or Fit shows empty space.
+        let mut s = two_layer_scene();
+        assert_eq!(s.visible_bounds(), s.bounds);
+
+        s.layers[1].visible = false;
+        assert_eq!(s.visible_bounds(), Aabb::new(v2(0.0, 0.0), v2(10.0, 10.0)));
+
+        s.layers[0].visible = false;
+        assert!(s.visible_bounds().is_empty(), "everything hidden should frame nothing");
+
+        s.layers[0].visible = true;
+        s.layers[1].visible = true;
+        assert_eq!(s.visible_bounds(), s.bounds, "restoring must restore the extent");
+    }
+
+    #[test]
+    fn a_layer_switched_off_in_the_file_is_left_out_of_the_extent() {
+        let mut s = two_layer_scene();
+        s.layers[1].visible_in_file = false;
+        assert_eq!(s.visible_bounds(), Aabb::new(v2(0.0, 0.0), v2(10.0, 10.0)));
+        // And the user ticking it cannot override the file.
+        s.layers[1].visible = true;
+        assert_eq!(s.visible_bounds(), Aabb::new(v2(0.0, 0.0), v2(10.0, 10.0)));
+    }
+
+    #[test]
+    fn construction_lines_never_enter_the_visible_extent() {
+        let mut s = two_layer_scene();
+        let mut ray = poly(0, Aabb::new(v2(-1e7, -1e7), v2(1e7, 1e7)));
+        ray.unbounded = true;
+        s.polys.push(ray);
+        assert_eq!(s.visible_bounds(), s.bounds, "an infinite line dragged out the extent");
+    }
+}

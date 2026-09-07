@@ -187,6 +187,36 @@ mod tests {
     }
 
     #[test]
+    fn zoom_is_clamped_at_both_ends() {
+        // Without the clamp, repeated zooming drives the scale to zero or infinity and every
+        // later world/screen conversion returns NaN. Deleting the guard must fail a test.
+        let mut c = cam();
+        for _ in 0..2000 {
+            c.zoom_at(c.view.center(), 4.0);
+        }
+        assert!(c.scale.is_finite(), "zoom ran away to {}", c.scale);
+        assert!(c.world_to_screen(v2(1.0, 1.0)).is_finite());
+
+        let mut c = cam();
+        for _ in 0..2000 {
+            c.zoom_at(c.view.center(), 0.25);
+        }
+        assert!(c.scale > 0.0, "zoom collapsed to {}", c.scale);
+        assert!(c.screen_to_world(v2(1.0, 1.0)).is_finite());
+    }
+
+    #[test]
+    fn fit_clamps_a_drawing_too_large_or_too_small_to_scale() {
+        // A drawing spanning the whole float range, and one smaller than the clamp can express.
+        let mut c = cam();
+        c.fit(&Aabb::new(v2(-1e300, -1e300), v2(1e300, 1e300)));
+        assert!(c.scale > 0.0 && c.scale.is_finite(), "{}", c.scale);
+        let mut c = cam();
+        c.fit(&Aabb::new(v2(0.0, 0.0), v2(1e-300, 1e-300)));
+        assert!(c.scale > 0.0 && c.scale.is_finite(), "{}", c.scale);
+    }
+
+    #[test]
     fn visible_world_covers_the_viewport() {
         let c = cam();
         let vis = c.visible_world(0.0);
