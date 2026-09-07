@@ -43,7 +43,7 @@ how much of the file was drawn, and anything that could not be.
 `TEXT`, `MTEXT`, `ATTRIB`, `SOLID`, `TRACE`, `3DFACE`, `LEADER`, `MLINE`,
 `RAY`, `XLINE`, and dimensions via their pre-rendered geometry blocks.
 
-Five DXF details are handled once, at load, so the renderer never sees them:
+These DXF details are handled once, at load, so the renderer never sees them:
 
 - **Text encoding.** DXF moved to UTF-8 at R2007; older files use the code page
   in `$DWGCODEPAGE`. The `dxf` crate's `load_file` hardcodes Windows-1252, so
@@ -64,6 +64,15 @@ Five DXF details are handled once, at load, so the renderer never sees them:
   backwards and is pinned by a test.
 - **Curves.** Arcs, bulges, ellipses and splines all become polylines, at a
   tolerance relative to each curve's own size.
+
+- **Control codes.** `%%c`, `%%d` and `%%p` become Ø, ° and ±, so a bore
+  callout reads as a bore callout. MTEXT's inline formatting is stripped to
+  its text and line breaks.
+
+- **Legibility.** DXF palettes assume a black sheet, so yellow and green are
+  nearly invisible on a white one. Palette colours that would disappear against
+  the current background are pulled back far enough to read, keeping their hue;
+  true colours, which the author chose explicitly, are left as written.
 
 - **Linetypes.** Dash patterns are stored in drawing units and scaled by both
   `$LTSCALE` and the entity's own multiplier, so how a dashed line looks depends
@@ -152,7 +161,7 @@ libasound2-dev`.
 |---|---|
 | `geom.rs` | `f64` vectors, affine transforms, AABBs, segment clipping |
 | `read.rs` | choosing a file's text encoding from its header |
-| `aci.rs` | the AutoCAD Color Index palette |
+| `aci.rs` | the AutoCAD Color Index palette, and keeping it legible |
 | `tessellate.rs` | arcs, bulges, ellipses, NURBS → polylines |
 | `convert.rs` | `dxf::Drawing` → `Scene`: OCS, blocks, colours, curves |
 | `scene.rs` | the render model |
