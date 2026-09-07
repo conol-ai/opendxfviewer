@@ -122,11 +122,12 @@ like a regression is worth re-taking on a quiet machine first.
 
 | | |
 |---|---|
-| Parse | 223 ms |
-| Convert to a scene | 52 ms |
-| Frame, whole drawing on screen | 8.0 ms (530k segments) |
-| Frame, zoomed in 4× | 1.9 ms |
+| Parse | 190 ms |
+| Convert to a scene | 48 ms |
+| Frame, whole drawing on screen | 8.4 ms (530k segments) |
+| Frame, zoomed in 4× | 2.3 ms |
 | Frame, zoomed in 64× | 21 µs |
+| Frame, zoomed in 1024× | 1.2 µs |
 
 Three things make that work:
 
