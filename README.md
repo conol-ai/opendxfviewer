@@ -138,7 +138,7 @@ carry coordinates in the millions, where `f32` quantises to centimetres.
 ## Building
 
 ```sh
-cargo test            # 155 tests, no GPU needed
+cargo test            # 156 tests, no GPU needed
 cargo clippy --all-targets -- -D warnings
 cargo run --release -- tests/fixtures/basic.dxf
 ```
@@ -180,6 +180,8 @@ readers: bulged polylines, OCS extrusion normals including the `-Z` mirror and
 the 1/64 threshold, nested and mirrored and arrayed `INSERT`s, rational and
 periodic splines, every text justification, and deliberately degenerate
 geometry (zero radii, zero-length lines, empty polylines, coordinates at 1e9).
+Every entity type listed above appears in at least one fixture, so none of them
+can quietly stop working.
 Regenerate them with `python3 tools/gen_fixtures.py`; add `--all` for the two
 large performance fixtures, which are not checked in.
 

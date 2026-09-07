@@ -440,6 +440,50 @@ def f_annotation():
     return d
 
 
+def f_misc_entities():
+    """TRACE, LEADER, MLINE and DIMENSION — the four the README claims but nothing covered."""
+    d = Dxf()
+    d.layer("0", 7); d.layer("ANNO", 3)
+
+    # TRACE has SOLID's corner order: the last two are stored swapped.
+    d.add(chunk((0, "TRACE"), (8, "0"), (62, 1),
+                (10, 0.0), (20, 0.0), (30, 0.0), (11, 30.0), (21, 0.0), (31, 0.0),
+                (12, 0.0), (22, 12.0), (32, 0.0), (13, 30.0), (23, 12.0), (33, 0.0)))
+
+    # LEADER: a vertex count followed by that many points.
+    pts = [(50.0, 0.0), (65.0, 10.0), (85.0, 10.0)]
+    p = [(0, "LEADER"), (8, "ANNO"), (3, "STANDARD"), (76, len(pts))]
+    for (x, y) in pts:
+        p += [(10, x), (20, y), (30, 0.0)]
+    d.add(chunk(*p))
+
+    # MLINE: drawn as its centreline, which is what the README says.
+    verts = [(0.0, 30.0), (40.0, 30.0), (40.0, 60.0)]
+    p = [(0, "MLINE"), (8, "0"), (62, 5), (2, "STANDARD"), (40, 1.0), (70, 0), (71, 0),
+         (72, len(verts)), (73, 1),
+         (10, verts[0][0]), (20, verts[0][1]), (30, 0.0)]
+    for (x, y) in verts:
+        p += [(11, x), (21, y), (31, 0.0), (12, 1.0), (22, 0.0), (32, 0.0),
+              (13, 0.0), (23, 1.0), (33, 0.0), (74, 1), (41, 0.0), (75, 0)]
+    d.add(chunk(*p))
+
+    # DIMENSION: the geometry lives in a pre-rendered anonymous block, which is what we draw.
+    d.block("*D1", (0, 0), [
+        line(60, 40, 100, 40, layer="ANNO"),
+        line(60, 38, 60, 42, layer="ANNO"),
+        line(100, 38, 100, 42, layer="ANNO"),
+        text(80, 42, 3, "40", halign=1, x2=80.0, y2=42.0, layer="ANNO"),
+    ])
+    # The reader dispatches on the group 100 subclass marker, not on the group 70 type code.
+    d.add(chunk((0, "DIMENSION"), (8, "ANNO"), (2, "*D1"), (70, 0), (3, "STANDARD"),
+                (10, 60.0), (20, 40.0), (30, 0.0),
+                (11, 80.0), (21, 44.0), (31, 0.0),
+                (100, "AcDbAlignedDimension"),
+                (13, 60.0), (23, 40.0), (33, 0.0),
+                (14, 100.0), (24, 40.0), (34, 0.0)))
+    return d
+
+
 def f_latin1():
     """Pre-R2007, so the text is Windows-1252 rather than UTF-8."""
     d = Dxf(version="AC1015", codepage="ANSI_1252")
@@ -616,6 +660,7 @@ FIXTURES = {
     "malformed.dxf": f_malformed,
     "showcase.dxf": f_showcase,
     "annotation.dxf": f_annotation,
+    "misc_entities.dxf": f_misc_entities,
     "latin1.dxf": f_latin1,
 }
 

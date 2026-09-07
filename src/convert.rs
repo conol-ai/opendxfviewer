@@ -2049,6 +2049,49 @@ mod tests {
     }
 
     #[test]
+    fn the_four_remaining_claimed_entity_types_are_drawn() {
+        // TRACE, LEADER, MLINE and DIMENSION are all listed in the README and none of them had a
+        // fixture, so any of the four could have silently stopped working.
+        let s = load("misc_entities.dxf");
+
+        // TRACE fills like a SOLID, with the same swapped last two corners.
+        let tris: Vec<&Tri> = s.tris.iter().collect();
+        assert_eq!(tris.len(), 2, "TRACE should fill as two triangles");
+        let b = tris.iter().fold(Aabb::EMPTY, |a, t| a.union(&t.bbox));
+        assert!(close(b.min.x, 0.0) && close(b.max.x, 30.0), "{b:?}");
+        assert!(close(b.min.y, 0.0) && close(b.max.y, 12.0), "{b:?}");
+
+        // LEADER is its vertex chain.
+        let leader = s
+            .polys
+            .iter()
+            .find(|p| p.bbox.min.x >= 49.0 && p.bbox.max.x <= 86.0 && p.len == 3)
+            .expect("the LEADER");
+        assert_eq!(s.vertices(leader)[0], v2(50.0, 0.0));
+        assert_eq!(s.vertices(leader)[2], v2(85.0, 10.0));
+
+        // MLINE is drawn as its centreline, and says so rather than pretending it is complete.
+        assert!(s.polys.iter().any(|p| p.len == 3 && p.bbox.max.y >= 60.0), "the MLINE");
+        assert!(
+            s.stats.unsupported.iter().any(|(k, _)| k.contains("MLINE")),
+            "a partially drawn MLINE should be reported: {:?}",
+            s.stats.unsupported
+        );
+
+        // DIMENSION draws the pre-rendered geometry block the authoring program produced: the
+        // dimension line, both extension ticks, and the measurement text.
+        assert_eq!(s.texts.len(), 1, "the dimension text");
+        assert_eq!(s.texts[0].text, "40");
+        let anno = s.layers.iter().position(|l| l.name == "ANNO").unwrap() as u16;
+        let dim_lines = s
+            .polys
+            .iter()
+            .filter(|p| p.layer == anno && p.len == 2 && p.bbox.min.x >= 59.0)
+            .count();
+        assert_eq!(dim_lines, 3, "dimension line plus two extension ticks");
+    }
+
+    #[test]
     fn every_primitive_points_at_a_real_layer() {
         for f in
             ["basic.dxf", "polylines.dxf", "curves.dxf", "blocks.dxf", "text.dxf", "ocs_3d.dxf"]
