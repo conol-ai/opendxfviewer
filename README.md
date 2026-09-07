@@ -30,7 +30,7 @@ dropping a `.dxf` file onto the window.
 | Layers | toggle in the left panel; **All** brings everything back |
 | Line weights | toggle in the toolbar to draw the file's stored widths |
 | Dashes | toggle to draw the file's linetypes, or force everything solid |
-| Background | toggle **Light**, which re-resolves colour index 7 |
+| Background | toggle **Light** for a paper sheet; colours re-resolve to suit it |
 
 The status bar shows the cursor position in drawing units, the current scale,
 how much of the file was drawn, and anything that could not be.
@@ -138,7 +138,7 @@ carry coordinates in the millions, where `f32` quantises to centimetres.
 ## Building
 
 ```sh
-cargo test            # 161 tests, no GPU needed
+cargo test            # 166 tests, no GPU needed
 cargo clippy --all-targets -- -D warnings
 cargo run --release -- tests/fixtures/basic.dxf
 ```

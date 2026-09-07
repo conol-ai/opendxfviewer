@@ -103,6 +103,58 @@ pub fn rgb(index: i16, dark_background: bool) -> Rgb {
     }
 }
 
+/// Pull a colour back toward the foreground when it would be illegible against the background.
+///
+/// The two directions fail differently, so they are measured differently:
+///
+/// * On a **light** sheet, legibility is luminance. Saturated yellow is as bright as paper, so it
+///   disappears however vivid it is — and its RGB distance from white is large, which is why a
+///   distance test would miss it.
+/// * On a **dark** sheet, chroma carries too. Pure red has barely more luminance than the sheet
+///   and is perfectly readable, so a luminance test would wash out every saturated colour for no
+///   reason. What actually vanishes there is the near-black greys, which are close in *every*
+///   channel.
+///
+/// Only colours that fail their own test are moved, and only far enough to read, so the drawing
+/// keeps its own colour coding.
+pub fn ensure_contrast(c: Rgb, dark_background: bool) -> Rgb {
+    const DARK_SHEET: Rgb = Rgb(27, 27, 30);
+    const LIGHT_SHEET: Rgb = Rgb(249, 249, 247);
+    /// Minimum luminance below paper.
+    const LIGHT_FLOOR: f32 = 0.45;
+    /// Minimum RGB distance from the sheet, as a fraction of the diagonal.
+    const DARK_FLOOR: f32 = 0.18;
+
+    if dark_background {
+        let gap = rgb_distance(c, DARK_SHEET);
+        if gap >= DARK_FLOOR {
+            return c;
+        }
+        let room = 1.0 - c.luma();
+        if room <= f32::EPSILON {
+            return c;
+        }
+        mix(c, Rgb::WHITE, ((DARK_FLOOR - gap) / DARK_FLOOR).clamp(0.0, 1.0) * 0.8)
+    } else {
+        let gap = LIGHT_SHEET.luma() - c.luma();
+        if gap >= LIGHT_FLOOR {
+            return c;
+        }
+        mix(c, Rgb::BLACK, ((LIGHT_FLOOR - gap) / LIGHT_FLOOR).clamp(0.0, 1.0) * 0.75)
+    }
+}
+
+/// Euclidean RGB distance, normalised so black to white is 1.0.
+fn rgb_distance(a: Rgb, b: Rgb) -> f32 {
+    let d = |x: u8, y: u8| (x as f32 - y as f32) / 255.0;
+    (d(a.0, b.0).powi(2) + d(a.1, b.1).powi(2) + d(a.2, b.2).powi(2)).sqrt() / 3.0f32.sqrt()
+}
+
+fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    Rgb(f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +205,62 @@ mod tests {
         for i in [BY_BLOCK, BY_LAYER, 300, i16::MAX, i16::MIN] {
             assert_eq!(rgb(i, true), Rgb::WHITE);
             assert_eq!(rgb(i, false), Rgb::BLACK);
+        }
+    }
+
+    #[test]
+    fn bright_colours_are_darkened_on_paper() {
+        // Yellow, green and cyan are readable on black and nearly invisible on white.
+        for aci in [2, 3, 4] {
+            let c = PALETTE[aci];
+            let out = ensure_contrast(c, false);
+            assert!(out.luma() < c.luma() - 0.1, "ACI {aci} left at luma {}", out.luma());
+            // Still recognisably the same hue: the ordering of the channels is unchanged.
+            let order = |r: Rgb| {
+                let mut v = [(r.0, 0), (r.1, 1), (r.2, 2)];
+                v.sort();
+                [v[0].1, v[1].1, v[2].1]
+            };
+            assert_eq!(order(out), order(c), "ACI {aci} changed hue");
+        }
+    }
+
+    #[test]
+    fn saturated_colours_are_left_alone_on_a_dark_sheet() {
+        // This is the case a luminance-only rule gets wrong: red has barely more luminance than
+        // a dark sheet and is perfectly readable on it.
+        for aci in [1, 2, 3, 4, 5, 6] {
+            assert_eq!(ensure_contrast(PALETTE[aci], true), PALETTE[aci], "ACI {aci} on dark");
+        }
+        assert_eq!(ensure_contrast(Rgb::WHITE, true), Rgb::WHITE);
+    }
+
+    #[test]
+    fn near_black_is_lifted_on_a_dark_sheet() {
+        // And this is the case an RGB-distance rule gets right and luminance does not.
+        for c in [Rgb(0, 0, 0), Rgb(0x20, 0x20, 0x20), Rgb(0x13, 0x00, 0x00)] {
+            let out = ensure_contrast(c, true);
+            assert!(out.luma() > c.luma() + 0.02, "{c:?} left at luma {}", out.luma());
+        }
+    }
+
+    #[test]
+    fn dark_colours_are_left_alone_on_paper() {
+        assert_eq!(ensure_contrast(Rgb::BLACK, false), Rgb::BLACK);
+        assert_eq!(ensure_contrast(PALETTE[5], false), PALETTE[5]); // blue
+    }
+
+    #[test]
+    fn every_palette_entry_moves_away_from_the_sheet_or_not_at_all() {
+        for &dark in &[true, false] {
+            for c in PALETTE {
+                let out = ensure_contrast(c, dark);
+                if dark {
+                    assert!(out.luma() >= c.luma() - 1e-6, "{c:?} darkened on a dark sheet");
+                } else {
+                    assert!(out.luma() <= c.luma() + 1e-6, "{c:?} lightened on paper");
+                }
+            }
         }
     }
 

@@ -239,6 +239,16 @@ pub struct DxfCanvas {
 }
 
 impl DxfCanvas {
+    /// Switch the canvas between a dark and a light sheet.
+    ///
+    /// The entity colours are resolved against the background at conversion time, so this has to
+    /// move with them: flipping one without the other paints black geometry on a black sheet.
+    pub fn set_dark_background(&mut self, cx: &mut Cx, dark: bool) {
+        let c = if dark { DARK_SHEET } else { LIGHT_SHEET };
+        self.draw_bg.color = vec4(c.0, c.1, c.2, 1.0);
+        self.redraw(cx);
+    }
+
     pub fn set_scene(&mut self, cx: &mut Cx, scene: Scene) {
         self.scene = scene;
         self.pending_fit = true;
@@ -519,6 +529,11 @@ impl Widget for DxfCanvas {
         DrawStep::done()
     }
 }
+
+/// The two sheet colours. Not pure black and white: a CAD sheet at full contrast is tiring, and
+/// pure black hides the near-black greys that drawings authored for a dark background use.
+const DARK_SHEET: (f32, f32, f32) = (0.106, 0.106, 0.118);
+const LIGHT_SHEET: (f32, f32, f32) = (0.976, 0.976, 0.969);
 
 /// A font's reported line height is taller than its cap height; DXF text height is the cap height.
 const CAP_HEIGHT_RATIO: f32 = 1.32;

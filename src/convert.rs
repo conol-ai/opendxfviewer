@@ -42,6 +42,10 @@ pub struct Options {
     pub max_block_depth: u32,
     /// Total primitives after which conversion stops. Guards against a block-array bomb.
     pub max_primitives: usize,
+    /// Pull palette colours back when they would be illegible against the background.
+    ///
+    /// DXF palettes assume a black sheet, so yellow and green all but vanish on a white one.
+    pub adjust_contrast: bool,
     /// Total vertices after which conversion stops.
     ///
     /// Primitives alone do not bound memory: a MINSERT array of a block full of circles produces
@@ -54,6 +58,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             dark_background: true,
+            adjust_contrast: true,
             curve_quality: 4e-3,
             max_block_depth: 16,
             // A 169k-entity drawing converts to 145k primitives and 2.9M vertices, so these leave
@@ -152,7 +157,14 @@ impl<'a> Ctx<'a> {
         layer_ids.insert("0".to_string(), 0u16);
         for l in dr.layers() {
             let color = match l.color.index() {
-                Some(i) => aci::rgb(i as i16, opts.dark_background),
+                Some(i) => {
+                    let c = aci::rgb(i as i16, opts.dark_background);
+                    if opts.adjust_contrast {
+                        aci::ensure_contrast(c, opts.dark_background)
+                    } else {
+                        c
+                    }
+                }
                 // A layer whose colour index is negated is switched off; the index itself is not
                 // recoverable through this crate's API, so fall back to the foreground.
                 None => fg,
@@ -285,7 +297,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn color_of(&self, e: &Entity, inh: &Inherit, layer: u16) -> Rgb {
-        // A 24-bit true colour, when present, wins over the palette index.
+        // A 24-bit true colour is what the author actually chose, so it is used as written —
+        // only palette indices, which assume a black sheet, are adjusted for the background.
         let tc = e.common.color_24_bit;
         if tc != 0 {
             return Rgb((tc >> 16) as u8, (tc >> 8) as u8, tc as u8);
@@ -295,10 +308,19 @@ impl<'a> Ctx<'a> {
             return inh.color;
         }
         if let Some(i) = c.index() {
-            return aci::rgb(i as i16, self.opts.dark_background);
+            return self.legible(aci::rgb(i as i16, self.opts.dark_background));
         }
         // ByLayer, ByEntity, or a switched-off marker: take the layer's colour.
         self.scene.layers.get(layer as usize).map(|l| l.color).unwrap_or(inh.color)
+    }
+
+    /// Keep a palette colour readable against the sheet it will be drawn on.
+    fn legible(&self, c: Rgb) -> Rgb {
+        if self.opts.adjust_contrast {
+            aci::ensure_contrast(c, self.opts.dark_background)
+        } else {
+            c
+        }
     }
 
     fn linetype_of(&self, e: &Entity, layer: u16) -> u16 {

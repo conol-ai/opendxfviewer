@@ -141,6 +141,11 @@ pub struct App {
     source: Option<PathBuf>,
     #[rust]
     loading: bool,
+    /// A file requested while another was still loading. Dropping the request instead would make
+    /// the Light toggle silently do nothing on a large drawing, leaving the tick box contradicting
+    /// what is on screen.
+    #[rust]
+    queued: Option<PathBuf>,
     /// Set while a file is hovering over the window, so the drop target reads as live.
     #[rust]
     drag_hover: bool,
@@ -174,6 +179,9 @@ impl App {
     /// Read, parse and convert a file on a worker thread.
     fn open(&mut self, cx: &mut Cx, path: PathBuf) {
         if self.loading {
+            // Keep only the newest request: if the user toggles twice while a big file is
+            // parsing, the second toggle is what they actually want.
+            self.queued = Some(path);
             return;
         }
         self.loading = true;
@@ -193,6 +201,11 @@ impl App {
 
     fn on_loaded(&mut self, cx: &mut Cx, result: Loaded) {
         self.loading = false;
+        // A request that arrived mid-load supersedes this result: start it and let it land.
+        if let Some(next) = self.queued.take() {
+            self.open(cx, next);
+            return;
+        }
         match result {
             Loaded::Err(msg) => {
                 self.ui.label(id!(title_label)).set_text(cx, &self.file_name.clone());
@@ -325,6 +338,10 @@ impl MatchEvent for App {
         }
         if let Some(light) = self.ui.check_box(id!(bg_check)).changed(actions) {
             self.dark = !light;
+            // The sheet and the geometry have to move together, or the drawing goes black on
+            // black. The canvas repaints immediately; the colours follow when the reconvert lands.
+            let dark = self.dark;
+            self.with_canvas(cx, |c, cx| c.set_dark_background(cx, dark));
             self.retheme(cx);
         }
 
