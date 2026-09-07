@@ -453,7 +453,10 @@ impl Widget for DxfCanvas {
         if !self.batch.tris.is_empty() {
             self.draw_tri.draw_super.draw_clip = clip;
             if let Some(mut mi) = cx.begin_many_instances(&self.draw_tri.draw_super.draw_vars) {
-                mi.instances.reserve(self.batch.tris.len() * TRI_SLOTS);
+                // The slot count comes from the shader's mapping at runtime, so asking the
+                // instance itself keeps the reserve right even if a field is added.
+                let slots = self.draw_tri.draw_super.draw_vars.as_slice().len();
+                mi.instances.reserve(self.batch.tris.len() * slots);
                 for t in &self.batch.tris {
                     self.draw_tri.pa = fv(t.a);
                     self.draw_tri.pb = fv(t.b);
@@ -473,7 +476,8 @@ impl Widget for DxfCanvas {
             // registers an align entry, and every enclosing end_turtle then rewrites four floats
             // per instance. At half a million segments that scatter dominates the frame.
             if let Some(mut mi) = cx.begin_many_instances(&self.draw_seg.draw_super.draw_vars) {
-                mi.instances.reserve(self.batch.segs.len() * SEG_SLOTS);
+                let slots = self.draw_seg.draw_super.draw_vars.as_slice().len();
+                mi.instances.reserve(self.batch.segs.len() * slots);
                 for s in &self.batch.segs {
                     push_seg(&mut self.draw_seg, &mut mi.instances, s);
                 }
@@ -516,10 +520,6 @@ impl Widget for DxfCanvas {
     }
 }
 
-/// Instance slots per segment: DrawQuad's ten, plus half_width and colour.
-const SEG_SLOTS: usize = 15;
-/// Instance slots per triangle: DrawQuad's ten, plus three points and a colour.
-const TRI_SLOTS: usize = 20;
 /// A font's reported line height is taller than its cap height; DXF text height is the cap height.
 const CAP_HEIGHT_RATIO: f32 = 1.32;
 /// Where the baseline sits within the laid-out run height, measured from the top.
