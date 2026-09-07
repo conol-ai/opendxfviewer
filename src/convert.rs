@@ -46,6 +46,12 @@ pub struct Options {
     ///
     /// DXF palettes assume a black sheet, so yellow and green all but vanish on a white one.
     pub adjust_contrast: bool,
+    /// Total bytes of text that may be retained.
+    ///
+    /// A `Text` owns its string, so a block of long labels arrayed by a MINSERT copies every one
+    /// of them per cell. Neither the primitive nor the vertex counter sees that — text has no
+    /// vertices — so without its own budget a 400 KB file can allocate gigabytes.
+    pub max_text_bytes: usize,
     /// Block-array cells that may be expanded in total.
     ///
     /// Separate from the primitive and vertex budgets because a block can expand to *nothing* —
@@ -73,6 +79,7 @@ impl Default for Options {
             max_primitives: 2_000_000,
             max_vertices: 20_000_000,
             max_block_cells: 4_000_000,
+            max_text_bytes: 32 << 20,
         }
     }
 }
@@ -117,6 +124,8 @@ struct Ctx<'a> {
     unsupported: BTreeMap<&'static str, usize>,
     /// Block-array cells expanded so far, across every INSERT and every nesting level.
     cells: u64,
+    /// Bytes of text retained so far.
+    text_bytes: usize,
     warned_missing: HashSet<String>,
     truncated: bool,
 }
@@ -216,6 +225,7 @@ impl<'a> Ctx<'a> {
             scene,
             unsupported: BTreeMap::new(),
             cells: 0,
+            text_bytes: 0,
             warned_missing: HashSet::new(),
             truncated: false,
         }
@@ -364,6 +374,7 @@ impl<'a> Ctx<'a> {
             || self.scene.stats.primitives >= self.opts.max_primitives
             || self.scene.verts.len() >= self.opts.max_vertices
             || self.cells >= self.opts.max_block_cells
+            || self.text_bytes >= self.opts.max_text_bytes
     }
 
     // -- emitters -------------------------------------------------------------------------
@@ -930,6 +941,13 @@ impl<'a> Ctx<'a> {
         let rotation = rotation + x.apply_dir(v2(1.0, 0.0)).angle();
         let width_factor =
             if width_factor.is_finite() && width_factor > 0.0 { width_factor } else { 1.0 };
+        // A `Text` owns its string, and a block of labels under a MINSERT copies them per cell.
+        // Nothing else counts that, so it is charged here.
+        self.text_bytes = self.text_bytes.saturating_add(s.len());
+        if self.text_bytes >= self.opts.max_text_bytes {
+            self.truncated = true;
+            return;
+        }
         let bbox = text_bbox(s, pos, height, rotation, width_factor, halign, valign);
         self.scene.texts.push(Text {
             text: s.to_string(),
@@ -2059,6 +2077,44 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "conversion kept working after the budget ran out"
+        );
+    }
+
+    #[test]
+    fn text_is_charged_to_a_memory_budget() {
+        // A Text owns its string, and a block of labels under a MINSERT copies every one of them
+        // per cell. Neither the primitive nor the vertex counter sees that — text has no vertices
+        // — so a 412 KB file used to allocate 4.4 GB.
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        let mut b = dxf::Block { name: "T".into(), ..Default::default() };
+        for i in 0..200 {
+            b.entities.push(Entity::new(EntityType::Text(Text {
+                value: "X".repeat(2000),
+                text_height: 1.0,
+                location: dxf::Point::new(0.0, i as f64, 0.0),
+                ..Default::default()
+            })));
+        }
+        dr.add_block(b);
+        dr.add_entity(Entity::new(EntityType::Insert(Insert {
+            name: "T".into(),
+            column_count: 200,
+            row_count: 200,
+            column_spacing: 1.0,
+            row_spacing: 1.0,
+            ..Default::default()
+        })));
+
+        let opts = Options { max_text_bytes: 1 << 20, ..Options::default() };
+        let s = convert(&dr, &opts);
+        let held: usize = s.texts.iter().map(|t| t.text.len()).sum();
+        assert!(held <= opts.max_text_bytes, "{held} bytes retained");
+        assert!(!s.texts.is_empty(), "the budget should truncate, not draw nothing");
+        assert!(
+            s.stats.warnings.iter().any(|w| w.contains("larger than")),
+            "{:?}",
+            s.stats.warnings
         );
     }
 
