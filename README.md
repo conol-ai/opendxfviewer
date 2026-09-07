@@ -114,8 +114,11 @@ and half a gigabyte, with a warning saying it was cut short.
 
 ## Performance
 
-Measured on an Apple M-series laptop, release build, against a generated
-169,229-entity drawing (`python3 tools/gen_fixtures.py --huge`):
+Measured with `cargo run --release --example bench`, on an otherwise idle
+Apple M-series laptop, against a generated 169,229-entity drawing
+(`python3 tools/gen_fixtures.py --huge`). The idle part matters: under load the
+same build reports three to four times these figures, so a number that looks
+like a regression is worth re-taking on a quiet machine first.
 
 | | |
 |---|---|
