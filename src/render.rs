@@ -369,6 +369,19 @@ fn dash_pattern<'a>(
 }
 
 impl Dash<'_> {
+    /// Advance the pattern offset by `len` pixels without emitting anything.
+    ///
+    /// The pattern repeats, so skipping a stretch is one modulo rather than a loop over it.
+    fn advance(&self, at: f64, len: f64) -> f64 {
+        let total = self.total.max(f64::MIN_POSITIVE);
+        let n = at + len;
+        if n.is_finite() {
+            n.rem_euclid(total)
+        } else {
+            0.0
+        }
+    }
+
     /// Walk `len` pixels from pattern offset `at`, calling `f(start, end)` for each lit run.
     ///
     /// Returns the offset to resume from, so a polyline's dashes carry across its vertices rather
@@ -504,9 +517,59 @@ fn push_run(
         return phase;
     }
     let dir = (b - a) / len;
-    d.walk(phase, len, |s, e| {
-        push_seg(out, a + dir * s, a + dir * e, half_w, color, clip);
-    })
+
+    // Walk only the part that is on screen. A span can be enormously longer than the viewport —
+    // a long line under heavy zoom is millions of pixels — and stepping the pattern across all of
+    // it costs an iteration per dash to emit nothing. The pattern is periodic, so the skipped
+    // distance folds into the phase arithmetically instead.
+    let pad = half_w as f64 + 2.0;
+    let (from, to) = match visible_span(a, dir, len, &clip.expand(pad)) {
+        Some(span) => span,
+        // Entirely off screen: nothing to draw, but the phase still has to advance so the dashes
+        // line up when the polyline comes back into view.
+        None => return d.advance(phase, len),
+    };
+
+    let phase_at_from = d.advance(phase, from);
+    d.walk(phase_at_from, to - from, |s, e| {
+        push_seg(out, a + dir * (from + s), a + dir * (from + e), half_w, color, clip);
+    });
+    d.advance(phase, len)
+}
+
+/// The sub-range of `[0, len]` along `dir` from `a` that lies inside `r`, if any.
+fn visible_span(a: V2, dir: V2, len: f64, r: &Aabb) -> Option<(f64, f64)> {
+    let (mut t0, mut t1) = (0.0f64, len);
+    for (p, q) in [
+        (-dir.x, a.x - r.min.x),
+        (dir.x, r.max.x - a.x),
+        (-dir.y, a.y - r.min.y),
+        (dir.y, r.max.y - a.y),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                if t > t1 {
+                    return None;
+                }
+                t0 = t0.max(t);
+            } else {
+                if t < t0 {
+                    return None;
+                }
+                t1 = t1.min(t);
+            }
+        }
+    }
+    if t0 > t1 {
+        None
+    } else {
+        Some((t0.max(0.0), t1.min(len)))
+    }
 }
 
 fn push_seg(out: &mut Batch, a: V2, b: V2, half_w: f32, color: Rgb, clip: &Aabb) {
@@ -1103,6 +1166,84 @@ mod tests {
         build(&s, &wide_cam(1.0), &Style::default(), &mut b);
         assert!(b.segs.iter().any(|g| (g.b - g.a).len() < 1.0), "no dot was drawn");
         assert!(b.segs.iter().any(|g| (g.b - g.a).len() > 30.0), "no long dash was drawn");
+    }
+
+    #[test]
+    fn an_enormous_dashed_span_costs_only_what_is_visible() {
+        // A long line under heavy zoom spans millions of pixels. Stepping the pattern across all
+        // of it costs an iteration per dash to emit nothing; only the visible part should be
+        // walked. Before this was fixed the same case took over a second.
+        let mut s = dashed_scene(&[0.005, -0.005], 1.0);
+        s.verts = vec![v2(-1e6, 0.0), v2(1e6, 0.0)];
+        s.polys[0].len = 2;
+        s.polys[0].bbox = Aabb::new(v2(-1e6, 0.0), v2(1e6, 0.0));
+        s.bounds = s.polys[0].bbox;
+        s.build_index();
+
+        let cam = Camera {
+            center: V2::ZERO,
+            scale: 1000.0, // a 2e9 px span with a 10 px pattern cycle
+            view: Aabb::new(V2::ZERO, v2(1600.0, 1000.0)),
+        };
+        let mut b = Batch::default();
+        let t = std::time::Instant::now();
+        build(&s, &cam, &Style::default(), &mut b);
+        let took = t.elapsed();
+
+        assert!(took < std::time::Duration::from_millis(50), "took {took:?}");
+        // Only the on-screen dashes are emitted, and there are some.
+        assert!(!b.segs.is_empty(), "the visible dashes vanished");
+        assert!(b.segs.len() < 1000, "{} segments for a 1600px viewport", b.segs.len());
+    }
+
+    #[test]
+    fn skipping_off_screen_dashes_does_not_shift_the_visible_ones() {
+        // The phase has to advance across the skipped stretch, or dashes jump when the line
+        // scrolls in from off screen.
+        let s = dashed_scene(&[20.0, -10.0], 1.0);
+        // Same drawing, two viewports: one showing the line's start, one showing its middle.
+        let near = Camera {
+            center: v2(100.0, 0.0),
+            scale: 1.0,
+            view: Aabb::new(V2::ZERO, v2(200.0, 100.0)),
+        };
+        let far = Camera {
+            center: v2(700.0, 0.0),
+            scale: 1.0,
+            view: Aabb::new(V2::ZERO, v2(200.0, 100.0)),
+        };
+
+        // Dashes touching the viewport edge are clipped, so their start is the edge rather than
+        // the pattern's. Compare the interior ones, whose spacing is the pattern cycle exactly.
+        let interior_starts = |cam: &Camera| {
+            let mut b = Batch::default();
+            build(&s, cam, &Style::default(), &mut b);
+            let mut xs: Vec<f64> = b
+                .segs
+                .iter()
+                .filter(|g| {
+                    let w0 = cam.screen_to_world(g.a).x;
+                    let w1 = cam.screen_to_world(g.b).x;
+                    // A full-length dash, i.e. one the viewport did not trim.
+                    (w1 - w0 - 20.0).abs() < 0.1
+                })
+                .map(|g| cam.screen_to_world(g.a).x)
+                .collect();
+            xs.sort_by(f64::total_cmp);
+            xs
+        };
+        for cam in [&near, &far] {
+            let xs = interior_starts(cam);
+            assert!(xs.len() >= 3, "expected several whole dashes, got {}", xs.len());
+            // Every dash sits on the pattern grid, whatever part of the line is on screen.
+            for x in &xs {
+                let off = x.rem_euclid(30.0);
+                assert!(
+                    off.min(30.0 - off) < 0.05,
+                    "dash at {x} is off the 30-unit pattern grid by {off}"
+                );
+            }
+        }
     }
 
     #[test]

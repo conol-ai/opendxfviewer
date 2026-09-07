@@ -78,7 +78,9 @@ These DXF details are handled once, at load, so the renderer never sees them:
   `$LTSCALE` and the entity's own multiplier, so how a dashed line looks depends
   on the zoom. Dashes run continuously along a polyline rather than restarting
   at each vertex, and a pattern whose whole cycle falls under a few pixels is
-  drawn solid instead of as noise.
+  drawn solid instead of as noise. Only the on-screen part of a span is stepped
+  through: the pattern repeats, so the rest folds into the phase arithmetically
+  rather than costing an iteration per dash nobody sees.
 
 ### Known limitations
 
@@ -151,7 +153,7 @@ carry coordinates in the millions, where `f32` quantises to centimetres.
 ## Building
 
 ```sh
-cargo test            # 166 tests, no GPU needed
+cargo test            # 168 tests, no GPU needed
 cargo clippy --all-targets -- -D warnings
 cargo run --release -- tests/fixtures/basic.dxf
 ```
