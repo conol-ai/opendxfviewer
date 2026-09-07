@@ -2004,9 +2004,17 @@ mod tests {
         // The earlier version of this test named a block that did not exist, so the INSERT exited
         // on the missing-block branch and never reached the scale check at all.
         let s = load("malformed.dxf");
-        let near = |x: f64, y: f64| s.polys.iter().any(|p| p.bbox.center().dist(v2(x, y)) < 6.0);
+        // Every primitive kind, not just polylines: checking one array lets the guard be deleted
+        // and the collapsed geometry reappear as dots.
+        let near = |x: f64, y: f64| {
+            let c = v2(x, y);
+            s.polys.iter().any(|p| p.bbox.center().dist(c) < 6.0)
+                || s.dots.iter().any(|d| d.pos.dist(c) < 6.0)
+                || s.tris.iter().any(|t| t.bbox.center().dist(c) < 6.0)
+                || s.texts.iter().any(|t| t.pos.dist(c) < 6.0)
+        };
         assert!(near(40.0, 40.0), "the control insert at a usable scale should draw");
-        assert!(!near(0.0, 40.0), "a zero-scale insert should draw nothing");
+        assert!(!near(0.0, 40.0), "a zero-scale insert should draw nothing at all");
     }
 
     #[test]
@@ -2015,12 +2023,24 @@ mod tests {
         let dr =
             crate::read::load(format!("{}/tests/fixtures/basic.dxf", env!("CARGO_MANIFEST_DIR")))
                 .unwrap();
-        let c = Ctx::new(&dr, Options::default());
-        let n = c.scene.layers.len();
-        for name in ["WALLS", "walls", "Walls", "wAlLs"] {
-            assert!(c.layer_ids.contains_key(&name.to_uppercase()), "{name}");
-        }
-        assert_eq!(n, 4, "case variants must not create extra layers");
+        let mut c = Ctx::new(&dr, Options::default());
+        let before = c.scene.layers.len();
+        assert_eq!(before, 4);
+
+        // Resolve entities naming the same layer four different ways. Upper-casing the key inside
+        // the assertion would test the assertion, not the code — so this goes through layer_of.
+        let root = Inherit::root(0, Rgb::WHITE);
+        let ids: Vec<u16> = ["WALLS", "walls", "Walls", "wAlLs"]
+            .iter()
+            .map(|name| {
+                let mut e = Entity::new(EntityType::Line(dxf::entities::Line::default()));
+                e.common.layer = name.to_string();
+                // `layer_of` needs the drawing's lifetime; a leaked entity is fine in a test.
+                c.layer_of(Box::leak(Box::new(e)), &root)
+            })
+            .collect();
+        assert!(ids.windows(2).all(|w| w[0] == w[1]), "case variants split the layer: {ids:?}");
+        assert_eq!(c.scene.layers.len(), before, "case variants created extra layers");
     }
 
     /// Build a drawing in memory: a block of `per_block` circles, arrayed `cols` x `rows`.
@@ -2265,12 +2285,26 @@ mod tests {
     #[test]
     fn solids_produce_two_triangles_in_draw_order() {
         let s = load("ocs_3d.dxf");
-        // The SOLID spans (60,0)-(90,30); its corners are stored 1-2-4-3.
+        // SOLID stores its last two corners swapped, so the quad is 1-2-4-3. Asserting only the
+        // bounding box cannot tell that from 1-2-3-4 — both cover the same rectangle, but the
+        // wrong order draws a bow-tie with a hole through the middle.
         let tris: Vec<&Tri> = s.tris.iter().filter(|t| t.bbox.min.x >= 59.0).collect();
         assert_eq!(tris.len(), 2);
-        let b = tris.iter().fold(Aabb::EMPTY, |a, t| a.union(&t.bbox));
-        assert!(close(b.min.x, 60.0) && close(b.max.x, 90.0));
-        assert!(close(b.min.y, 0.0) && close(b.max.y, 30.0));
+
+        // The fixture's quad is irregular on purpose: for a rectangle both orderings cover the
+        // same area, so only this shape distinguishes them. Corners 1-2-4-3 enclose 936 units;
+        // reading them 1-2-3-4 encloses 756 and folds the quad through itself.
+        let area = |t: &Tri| ((t.b - t.a).cross(t.c - t.a)).abs() * 0.5;
+        let total: f64 = tris.iter().map(|t| area(t)).sum();
+        assert!(close(total, 1008.0), "covered {total}, expected 1008");
+
+        // And the two must share an edge — the quad's diagonal — rather than crossing.
+        let corners = |t: &Tri| [t.a, t.b, t.c];
+        let shared = corners(tris[0])
+            .iter()
+            .filter(|p| corners(tris[1]).iter().any(|q| p.dist(*q) < 1e-9))
+            .count();
+        assert_eq!(shared, 2, "the triangles do not share the quad's diagonal");
     }
 
     #[test]
@@ -2294,9 +2328,16 @@ mod tests {
 
     #[test]
     fn unsupported_entities_are_counted_rather_than_dropped_silently() {
-        let s = load("polylines.dxf");
-        // Nothing unsupported in this file, but the field must exist and be consistent.
-        assert!(s.stats.unsupported.iter().all(|(_, n)| *n > 0));
-        assert!(s.stats.primitives > 0);
+        // A file with nothing unsupported makes an `all(...)` assertion vacuously true, so this
+        // uses one that really does contain an entity we cannot draw.
+        let s = load("misc_entities.dxf");
+        assert!(!s.stats.unsupported.is_empty(), "MLINE should be reported as partial");
+        let total: usize = s.stats.unsupported.iter().map(|(_, n)| n).sum();
+        assert!(total > 0);
+        assert!(s.stats.unsupported.iter().all(|(k, n)| !k.is_empty() && *n > 0));
+
+        // And a file with nothing unsupported really reports nothing.
+        let clean = load("polylines.dxf");
+        assert!(clean.stats.unsupported.is_empty(), "{:?}", clean.stats.unsupported);
     }
 }

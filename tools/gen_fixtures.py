@@ -378,7 +378,10 @@ def f_ocs():
     # 3D geometry
     d.add(line(0, 0, 50, 50, z1=0.0, z2=40.0))
     d.add(face3d([(0, 0, 0), (40, 0, 0), (40, 40, 20), (0, 40, 20)], color=4))
-    d.add(solid([(60, 0), (90, 0), (60, 30), (90, 30)], color=1))   # note DXF's 3/4 swap
+    # Deliberately NOT a rectangle. SOLID stores its last two corners swapped, and for a
+    # rectangle both orderings cover the same area — so only an irregular quad can tell a correct
+    # reader from one that ignores the swap.
+    d.add(solid([(60, 0), (90, 0), (62, 24), (102, 36)], color=1))
     return d
 
 
