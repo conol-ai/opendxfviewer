@@ -11,6 +11,14 @@ use crate::geom::{Aabb, V2};
 pub const MAX_SEGMENTS: usize = 8192;
 /// Lower bound, so a curve never degenerates into a single chord.
 pub const MIN_SEGMENTS: usize = 4;
+/// Highest NURBS degree evaluated exactly.
+///
+/// De Boor is O(degree²) per point, so an unbounded degree is unbounded work: a 492 KB file
+/// declaring degree 3000 over 20000 control points took longer than 90 seconds. AutoCAD tops out
+/// at 11 and every real spline is 2 or 3, so this is far above anything legitimate while keeping
+/// a single evaluation cheap. Beyond it the curve is clamped, which changes its shape — but a
+/// degree-3000 curve through 20000 points is indistinguishable from its control polygon anyway.
+pub const MAX_DEGREE: usize = 64;
 
 /// How finely to flatten.
 #[derive(Copy, Clone, Debug)]
@@ -205,7 +213,7 @@ impl Nurbs {
         // Clamp first: the wrap below repeats exactly `degree` control points, so clamping
         // afterwards would leave the curve wrapped for one degree and evaluated at another, and
         // it would not close.
-        degree = degree.clamp(1, ctrl.len() - 1);
+        degree = degree.clamp(1, (ctrl.len() - 1).min(MAX_DEGREE));
 
         if closed {
             // A periodic curve is closed by wrapping `degree` control points onto the end. Files
@@ -320,6 +328,13 @@ pub fn flatten_nurbs(c: &Nurbs, tol: Tol, out: &mut Vec<V2>) {
     // subdivision that happens to sample symmetric points.
     let mut seeds: Vec<f64> = c.knots.iter().copied().filter(|&k| k > lo && k < hi).collect();
     seeds.dedup();
+    // A curve cannot produce more points than the budget allows, so seeding one span per interior
+    // knot is wasted work once there are more knots than that — and every span costs at least two
+    // evaluations. Take an even subsample instead.
+    if seeds.len() > tol.max_segments {
+        let stride = seeds.len().div_ceil(tol.max_segments).max(1);
+        seeds = seeds.iter().copied().step_by(stride).collect();
+    }
     let mut params = Vec::with_capacity(seeds.len() + 2);
     params.push(lo);
     params.extend(seeds);
@@ -786,6 +801,32 @@ mod tests {
         let c = nurbs(3, &ctrl, &[], &[], true);
         let (lo, hi) = c.domain();
         assert!(c.eval(lo).dist(c.eval(hi)) < 1e-9, "{:?} vs {:?}", c.eval(lo), c.eval(hi));
+    }
+
+    #[test]
+    fn an_absurd_degree_is_clamped_rather_than_evaluated() {
+        // De Boor is O(degree^2) per point, so an unbounded degree is unbounded work.
+        let ctrl: Vec<V2> = (0..500).map(|i| v2(i as f64, (i % 7) as f64)).collect();
+        let c = Nurbs::repair(3000, ctrl, vec![], vec![], false).unwrap();
+        assert!(c.degree <= MAX_DEGREE, "degree {} was not clamped", c.degree);
+        let (lo, hi) = c.domain();
+        assert!(c.eval(lo).is_finite() && c.eval(hi).is_finite());
+    }
+
+    #[test]
+    fn a_pathological_spline_flattens_promptly() {
+        let ctrl: Vec<V2> =
+            (0..20_000).map(|i| v2(i as f64 * 0.5, (i % 13) as f64 * 3.0)).collect();
+        let c = Nurbs::repair(3000, ctrl, vec![], vec![], false).unwrap();
+        let started = std::time::Instant::now();
+        let mut out = Vec::new();
+        flatten_nurbs(&c, Tol::new(0.1).with_max(2048), &mut out);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(!out.is_empty() && out.iter().all(|p| p.is_finite()));
     }
 
     #[test]
