@@ -138,7 +138,9 @@ Three things make that work:
 
 - **Makepad retains draw lists**, so `draw_walk` runs only on redraw. A view
   nobody is touching costs nothing; the numbers above are what a *change*
-  costs, not a steady-state frame.
+  costs, not a steady-state frame. The canvas owns its own draw list, which is
+  what makes that true of it specifically — sharing the parent's meant a
+  status-bar label following the cursor rebuilt the scene on every mouse-move.
 - **A uniform grid culls by viewport**, so cost tracks what is on screen rather
   than the size of the drawing — which is why zooming in gets cheaper.
 - **One instanced quad per segment**, emitted as raw floats into a single draw

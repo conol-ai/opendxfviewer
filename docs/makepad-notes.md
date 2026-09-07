@@ -130,6 +130,19 @@ Two consequences the code depends on:
 - Anything that redraws unconditionally destroys that. Never read `self.time` in a shader: it sets
   `uses_time`, which force-dirties every pass every frame, forever.
 
+**A widget only gets that benefit if it owns a `DrawList2d`.** Without one it draws into its
+parent's list, and then any redraw anywhere in that list re-runs its whole draw pass — a status-bar
+label following the mouse cursor was enough to rebuild this canvas on every single mouse-move.
+
+Owning one has a catch worth knowing: `#[redraw] area` is not sufficient any more. The area set by
+`cx.walk_turtle_with_area` is an `Area::Rect` into the *parent's* list, so dirtying it leaves your
+own list clean and the widget silently never repaints again. Mark both:
+
+```rust
+#[redraw] #[rust] area: Area,
+#[live] #[redraw] draw_list: DrawList2d,
+```
+
 An action emitted from inside `draw_walk` is **not reliably dispatched**. `app.rs` polls the
 camera's scale on each event instead of listening for one, because zoom-to-fit can only run inside
 the draw pass.

@@ -216,6 +216,17 @@ pub struct DxfCanvas {
     style: Style,
     #[rust]
     batch: Batch,
+    /// The canvas's own draw list.
+    ///
+    /// Without one it shares its parent's, and then *any* redraw in the window — a status-bar
+    /// label following the cursor, most of all — re-runs this widget's whole draw pass. With one,
+    /// Makepad keeps the emitted instances and skips us unless something marked the canvas dirty.
+    ///
+    /// It is `#[redraw]` as well as the area: `self.area` is an `Area::Rect` into the *parent's*
+    /// list, so dirtying it alone leaves this list clean and the canvas never repaints.
+    #[live]
+    #[redraw]
+    draw_list: DrawList2d,
 
     /// Camera centre when the current drag began. Finger events report a cumulative delta from the
     /// press, so panning has to be computed from a snapshot rather than accumulated.
@@ -428,6 +439,14 @@ impl Widget for DxfCanvas {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // Nothing dirtied the canvas, so the instances from last time are still on the GPU and
+        // this whole pass can be skipped. The turtle still has to walk, or the layout moves.
+        if self.draw_list.begin(cx, walk).is_not_redrawing() {
+            let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+            self.cam.set_view(Aabb::new(dv(rect.pos), dv(rect.pos + rect.size)));
+            return DrawStep::done();
+        }
+
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.cam.set_view(Aabb::new(dv(rect.pos), dv(rect.pos + rect.size)));
 
@@ -526,6 +545,7 @@ impl Widget for DxfCanvas {
             let _ = base;
         }
 
+        self.draw_list.end(cx);
         DrawStep::done()
     }
 }
