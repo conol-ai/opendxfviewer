@@ -521,7 +521,7 @@ impl<'a> Ctx<'a> {
             // location is in WCS, not in the plane the extrusion defines.
             EntityType::ModelPoint(p) => self.push_dot(inh.xform.apply(pt(&p.location)), st),
 
-            EntityType::Insert(i) => self.insert(i, e, inh, st),
+            EntityType::Insert(i) => self.insert(i, inh, st),
 
             // SOLID and TRACE store their last two corners in the opposite order to the one they
             // are drawn in, so the quad is 1-2-4-3. They are otherwise the same entity.
@@ -807,7 +807,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn insert(&mut self, i: &'a dxf::entities::Insert, _e: &'a Entity, inh: &Inherit, st: Style) {
+    fn insert(&mut self, i: &'a dxf::entities::Insert, inh: &Inherit, st: Style) {
         if inh.depth >= self.opts.max_block_depth {
             self.warn(format!(
                 "Stopped expanding blocks at {} levels deep (near \"{}\").",
@@ -826,12 +826,9 @@ impl<'a> Ctx<'a> {
             return;
         }
 
-        let n = vec3(&i.extrusion_direction);
         let basis = ocs(&i.extrusion_direction, 0.0);
         // The insertion point is itself in the INSERT's own OCS.
         let loc = ocs(&i.extrusion_direction, i.location.z).apply(v2(i.location.x, i.location.y));
-        let _ = n;
-
         // A zero scale factor collapses the block to nothing; DXF writers emit it for degenerate
         // inserts, and treating it as 1 would draw geometry AutoCAD does not.
         let s = v2(i.x_scale_factor, i.y_scale_factor);

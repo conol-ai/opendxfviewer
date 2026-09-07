@@ -146,9 +146,6 @@ pub struct App {
     /// what is on screen.
     #[rust]
     queued: Option<PathBuf>,
-    /// Set while a file is hovering over the window, so the drop target reads as live.
-    #[rust]
-    drag_hover: bool,
     /// Opening the dialog on the very first event is unsafe on macOS: the app has not finished
     /// launching and there is no key window yet. A CLI argument is deferred through this.
     #[rust]
@@ -412,13 +409,9 @@ impl AppMain for App {
                     if let Ok(mut r) = de.response.lock() {
                         *r = DragResponse::Copy;
                     }
-                    if !self.drag_hover {
-                        self.drag_hover = true;
-                    }
                 }
             }
             Event::Drop(de) => {
-                self.drag_hover = false;
                 let first = de.items.iter().find_map(|i| match i {
                     DragItem::FilePath { path, internal_id: None } if is_dxf(path) => {
                         Some(percent_decode(path))
@@ -429,7 +422,6 @@ impl AppMain for App {
                     self.open(cx, PathBuf::from(p));
                 }
             }
-            Event::DragEnd => self.drag_hover = false,
             Event::KeyDown(ke) => {
                 if ke.key_code == KeyCode::KeyO && ke.modifiers.logo | ke.modifiers.control {
                     self.pick_file(cx);
