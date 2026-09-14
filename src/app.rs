@@ -169,7 +169,8 @@ impl LiveRegister for App {
 /// What a worker thread hands back.
 enum Loaded {
     Ok(Box<Scene>, String, PathBuf),
-    Err(String),
+    /// The message, and the name of the file it is about.
+    Err(String, String),
 }
 
 impl App {
@@ -189,9 +190,11 @@ impl App {
         let opts = convert::Options { dark_background: self.dark, ..convert::Options::default() };
         let runner = self.ui_runner();
         std::thread::spawn(move || {
-            let result = load_blocking(&path, &opts).map_or_else(Loaded::Err, |scene| {
-                Loaded::Ok(Box::new(scene), file_label(&path), path.clone())
-            });
+            let name = file_label(&path);
+            let result = match load_blocking(&path, &opts) {
+                Ok(scene) => Loaded::Ok(Box::new(scene), name, path.clone()),
+                Err(msg) => Loaded::Err(msg, name),
+            };
             runner.defer(move |app: &mut App, cx: &mut Cx, _scope| app.on_loaded(cx, result));
         });
     }
@@ -204,8 +207,10 @@ impl App {
             return;
         }
         match result {
-            Loaded::Err(msg) => {
-                self.ui.label(id!(title_label)).set_text(cx, &self.file_name.clone());
+            Loaded::Err(msg, name) => {
+                // Name the file that failed. Falling back to the previously loaded one, or to
+                // nothing at all, leaves the message floating with no subject.
+                self.ui.label(id!(title_label)).set_text(cx, &name);
                 self.set_warning(cx, &msg);
             }
             Loaded::Ok(scene, name, path) => {
@@ -404,7 +409,7 @@ impl AppMain for App {
                 let wanted = de
                     .items
                     .iter()
-                    .any(|i| matches!(i, DragItem::FilePath { path, .. } if is_dxf(path)));
+                    .any(|i| matches!(i, DragItem::FilePath { path, .. } if is_droppable(path)));
                 if wanted {
                     if let Ok(mut r) = de.response.lock() {
                         *r = DragResponse::Copy;
@@ -413,7 +418,7 @@ impl AppMain for App {
             }
             Event::Drop(de) => {
                 let first = de.items.iter().find_map(|i| match i {
-                    DragItem::FilePath { path, internal_id: None } if is_dxf(path) => {
+                    DragItem::FilePath { path, internal_id: None } if is_droppable(path) => {
                         Some(percent_decode(path))
                     }
                     _ => None,
@@ -471,8 +476,15 @@ fn file_label(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-fn is_dxf(path: &str) -> bool {
-    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("dxf"))
+/// Extensions the window accepts on a drop.
+///
+/// `.dwg` is here despite not being readable: rejecting it at the drop means the file bounces
+/// with no explanation at all, and "nothing happened" is a worse answer than "this is a DWG,
+/// convert it first". The reader recognises it and says so.
+fn is_droppable(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("dxf") || e.eq_ignore_ascii_case("dwg"))
 }
 
 /// Makepad hands over the dropped URL with `file://` stripped but percent escapes intact, so a
@@ -546,13 +558,18 @@ mod tests {
     }
 
     #[test]
-    fn only_dxf_files_are_accepted_from_a_drop() {
-        assert!(is_dxf("/a/b.dxf"));
-        assert!(is_dxf("/a/b.DXF"));
-        assert!(is_dxf("/a/b.Dxf"));
-        assert!(!is_dxf("/a/b.dwg"));
-        assert!(!is_dxf("/a/dxf"));
-        assert!(!is_dxf("/a/b.dxf.zip"));
+    fn a_drop_accepts_drawings_and_nothing_else() {
+        for ok in ["/a/b.dxf", "/a/b.DXF", "/a/b.Dxf"] {
+            assert!(is_droppable(ok), "{ok}");
+        }
+        // DWG is accepted so the reader can name it. Silently refusing the drop tells the user
+        // nothing, which is the worse failure.
+        for ok in ["/a/b.dwg", "/a/b.DWG"] {
+            assert!(is_droppable(ok), "{ok}");
+        }
+        for no in ["/a/b.pdf", "/a/dxf", "/a/b.dxf.zip", "/a/b", "/a/b.step"] {
+            assert!(!is_droppable(no), "{no}");
+        }
     }
 
     #[test]

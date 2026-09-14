@@ -22,9 +22,48 @@ const SNIFF_BYTES: usize = 64 * 1024;
 pub fn load(path: impl AsRef<Path>) -> Result<dxf::Drawing, String> {
     let path = path.as_ref();
     let head = read_prefix(path).map_err(|e| format!("Could not read this file: {e}"))?;
+    if let Some(msg) = unsupported_format(&head) {
+        return Err(msg);
+    }
     let encoding = sniff(&head);
     dxf::Drawing::load_file_with_encoding(path, encoding)
         .map_err(|e| format!("Could not read this file: {e}"))
+}
+
+/// Recognise formats we cannot read, so they get an answer rather than a parse error.
+///
+/// Someone handed a DWG deserves to be told it is a DWG. Left to the parser it comes back as
+/// "invalid digit found in string at line/offset 1", which says nothing about what to do next.
+pub fn unsupported_format(head: &[u8]) -> Option<String> {
+    // DWG begins with its version tag at byte 0: AC1009 is R11/12 through AC1032 for 2018+.
+    // A DXF carries the same string in $ACADVER, but far later in the file, so byte 0 is safe.
+    if head.len() >= 6 && head.starts_with(b"AC10") && head[4].is_ascii_digit() {
+        let release = match &head[..6] {
+            b"AC1009" => "R11/12",
+            b"AC1012" | b"AC1014" => "R13/14",
+            b"AC1015" => "2000",
+            b"AC1018" => "2004",
+            b"AC1021" => "2007",
+            b"AC1024" => "2010",
+            b"AC1027" => "2013",
+            b"AC1032" => "2018 or later",
+            _ => "an unrecognised release",
+        };
+        return Some(format!(
+            "This is a DWG file ({release}), not a DXF. Save or export it as DXF and open that \
+             — in AutoCAD, Save As and pick a DXF format; free converters exist too."
+        ));
+    }
+    // Two more that get mistaken for CAD drawings often enough to be worth naming.
+    if head.starts_with(b"%PDF-") {
+        return Some("This is a PDF, not a DXF.".to_string());
+    }
+    if head.starts_with(b"PK\x03\x04") {
+        return Some(
+            "This is a zip archive, not a DXF. Extract it and open the drawing inside.".to_string(),
+        );
+    }
+    None
 }
 
 fn read_prefix(path: &Path) -> std::io::Result<Vec<u8>> {
@@ -208,6 +247,45 @@ mod tests {
         let mut h = header(&[("$ACADVER", "AC1015")]);
         h.extend(b"0\nTEXT\n1\nPLAIN ASCII\n");
         assert_eq!(sniff(&h), encoding_rs::WINDOWS_1252);
+    }
+
+    #[test]
+    fn a_dwg_is_named_rather_than_left_to_the_parser() {
+        // Left to the parser a DWG comes back as "invalid digit found in string at line/offset 1".
+        for (tag, release) in [
+            (&b"AC1032"[..], "2018"),
+            (&b"AC1015"[..], "2000"),
+            (&b"AC1021"[..], "2007"),
+            (&b"AC1009"[..], "R11/12"),
+        ] {
+            let mut f = tag.to_vec();
+            f.extend([0u8; 32]);
+            let msg = unsupported_format(&f).unwrap_or_else(|| panic!("{release} not recognised"));
+            assert!(msg.contains("DWG"), "{msg}");
+            assert!(msg.contains("DXF"), "the message should say what to do: {msg}");
+        }
+        // An unknown AC10xx still reports a DWG rather than falling through to the parser.
+        assert!(unsupported_format(b"AC1099\0\0\0\0").is_some());
+    }
+
+    #[test]
+    fn a_real_dxf_is_not_mistaken_for_a_dwg() {
+        // DXF carries the same AC10xx string in $ACADVER, but never at byte 0.
+        let dxf = header(&[("$ACADVER", "AC1032")]);
+        assert!(unsupported_format(&dxf).is_none());
+        for f in ["showcase.dxf", "latin1.dxf", "basic.dxf"] {
+            let p = format!("{}/tests/fixtures/{f}", env!("CARGO_MANIFEST_DIR"));
+            let bytes = std::fs::read(&p).unwrap();
+            assert!(unsupported_format(&bytes).is_none(), "{f} was rejected");
+        }
+    }
+
+    #[test]
+    fn other_files_people_mistake_for_drawings_are_named() {
+        assert!(unsupported_format(b"%PDF-1.7\n").unwrap().contains("PDF"));
+        assert!(unsupported_format(b"PK\x03\x04rest").unwrap().contains("zip"));
+        assert!(unsupported_format(b"0\nSECTION\n").is_none());
+        assert!(unsupported_format(b"").is_none());
     }
 
     #[test]

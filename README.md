@@ -8,6 +8,10 @@ scope: there is no editing, no conversion, and no CAD kernel. What it aims to do
 well is show you what is actually in the file — including the parts most viewers
 quietly drop.
 
+**DXF only — it does not read DWG.** DWG is Autodesk's closed binary format and
+needs a different parser entirely; export or convert to DXF first. Hand it a
+DWG and it will say so rather than failing with a parse error.
+
 ![opendxfviewer showing a drawing with its layer panel](docs/screenshot.png)
 
 ## Install and run
@@ -160,7 +164,7 @@ carry coordinates in the millions, where `f32` quantises to centimetres.
 ## Building
 
 ```sh
-cargo test            # 177 tests, no GPU needed
+cargo test            # 180 tests, no GPU needed
 cargo clippy --all-targets -- -D warnings
 cargo run --release -- tests/fixtures/basic.dxf
 ```
