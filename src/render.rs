@@ -319,6 +319,31 @@ fn refined<'a>(scene: &'a Scene, idx: usize, cam: &Camera, buf: &'a mut Vec<V2>)
             tess::flatten_ellipse(center, major, minor, start, sweep, tol, buf);
             buf
         }
+        CurveSource::Bulge { index } => {
+            let Some(b) = scene.bulges.get(index as usize) else { return stored };
+            // Predict the rebuilt length exactly: each span is either an arc needing the same
+            // chord count the arc branch computes, or a straight segment worth one.
+            let n = b.pts.len();
+            let spans = if b.closed { n } else { n.saturating_sub(1) };
+            let want: usize = (0..spans)
+                .map(|i| {
+                    let (p0, bulge) = b.pts[i];
+                    let p1 = b.pts[(i + 1) % n].0;
+                    match tess::bulge_arc(p0, p1, bulge) {
+                        Some(a) => tess::arc_segments(a.radius, a.sweep, tol),
+                        None => 1,
+                    }
+                })
+                .sum::<usize>()
+                + 1;
+            // Rebuilding has to earn its cost: a handful of extra vertices is not worth
+            // re-tessellating the whole polyline on every redraw.
+            if want <= stored.len() + stored.len() / 4 {
+                return stored;
+            }
+            tess::flatten_bulge_poly(&b.pts, b.closed, tol.with_max(4096), buf);
+            buf
+        }
         CurveSource::Spline { index } => {
             let Some(s) = scene.splines.get(index as usize) else { return stored };
             // Splines have no closed-form segment count; only refine once the drawing is large
@@ -775,6 +800,51 @@ mod tests {
             assert_eq!(refined(&s, idx, &cam, &mut buf).len(), stored, "{label} rebuilt when idle");
             assert!(buf.is_empty(), "{label} touched the scratch buffer needlessly");
         }
+    }
+
+    #[test]
+    fn a_rounded_corner_smooths_out_when_you_zoom_in() {
+        // Rounded corners are how CAD outlines are drawn, and a bulged polyline used to be
+        // flattened once at load and stored as CurveSource::None — so it could never be refined
+        // and stayed visibly faceted at any zoom.
+        let s = scene_of("polylines.dxf");
+        let idx = s
+            .polys
+            .iter()
+            .position(|p| matches!(p.source, CurveSource::Bulge { .. }))
+            .expect("a bulged polyline in the fixture");
+        let stored = s.polys[idx].len as usize;
+
+        let mut cam = Camera {
+            center: s.polys[idx].bbox.center(),
+            scale: 2000.0,
+            view: Aabb::new(V2::ZERO, v2(1600.0, 1000.0)),
+        };
+        let mut buf = Vec::new();
+        let fine = refined(&s, idx, &cam, &mut buf).to_vec();
+        assert!(fine.len() > stored * 2, "{} vertices at 2000x vs {stored} stored", fine.len());
+
+        // Refinement adds detail without moving the curve: every stored vertex still lies on it.
+        let size = s.polys[idx].bbox.size();
+        let tol = size.x.max(size.y) * 1e-2;
+        for c in s.vertices(&s.polys[idx]) {
+            let d = fine.iter().map(|f| f.dist(*c)).fold(f64::INFINITY, f64::min);
+            assert!(d < tol, "refinement moved the outline by {d}");
+        }
+
+        // Zoomed out again, the stored tessellation is enough and nothing is rebuilt.
+        cam.scale = 0.05;
+        let mut buf = Vec::new();
+        assert_eq!(refined(&s, idx, &cam, &mut buf).len(), stored);
+        assert!(buf.is_empty(), "rebuilt a curve the view cannot resolve");
+    }
+
+    #[test]
+    fn a_straight_polyline_keeps_nothing_to_refine() {
+        // Only polylines that actually curve are worth retaining.
+        let s = scene_of("basic.dxf");
+        let frame = s.polys.iter().find(|p| p.closed && p.len == 4).expect("the rectangular frame");
+        assert!(matches!(frame.source, CurveSource::None), "a straight polyline was retained");
     }
 
     #[test]

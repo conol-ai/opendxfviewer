@@ -67,11 +67,13 @@ These DXF details are handled once, at load, so the renderer never sees them:
   reference, not the outermost one — a distinction that is easy to get
   backwards and is pinned by a test.
 - **Curves.** Arcs, bulges, ellipses and splines all become polylines, at a
-  tolerance relative to each curve's own size.
+  tolerance relative to each curve's own size — and the curve definition is
+  kept, so zooming in re-tessellates rather than magnifying the facets.
 
 - **Control codes.** `%%c`, `%%d` and `%%p` become Ø, ° and ±, so a bore
-  callout reads as a bore callout. MTEXT's inline formatting is stripped to
-  its text and line breaks.
+  callout reads as a bore callout, and MTEXT's `\U+XXXX` escapes become the
+  characters they name. MTEXT's inline formatting is stripped to its text and
+  line breaks.
 
 - **Legibility.** DXF palettes assume a black sheet, so yellow and green are
   nearly invisible on a white one. Palette colours that would disappear against
@@ -104,6 +106,20 @@ These DXF details are handled once, at load, so the renderer never sees them:
   `MLINESTYLE` table.
 - Anything else unsupported is **counted and reported in the status bar**
   rather than dropped silently.
+
+### Files converted from DWG
+
+DXF produced by a converter is not always what a CAD program would write, and
+three cases are repaired on load rather than rejected:
+
+- **32-bit fields written unsigned.** True colour is `0xC2RRGGBB`, above
+  `i32::MAX`; read as signed it overflows and the file fails outright.
+- **UTF-8 characters split across an MTEXT continuation.** LibreDWG chunks long
+  text every 250 *bytes*, so a multi-byte character can be cut in half. The
+  chunks concatenate into valid text, so the split is moved onto a character
+  boundary.
+- **Thumbnail previews.** A preview bitmap with an unrecognised header made the
+  parser reject the whole drawing. It is a picture of the file; it is dropped.
 
 ### Hostile input
 
@@ -164,7 +180,7 @@ carry coordinates in the millions, where `f32` quantises to centimetres.
 ## Building
 
 ```sh
-cargo test            # 180 tests, no GPU needed
+cargo test            # 182 tests, no GPU needed
 cargo clippy --all-targets -- -D warnings
 cargo run --release -- tests/fixtures/basic.dxf
 ```

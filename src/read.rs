@@ -8,26 +8,197 @@
 //! The version and the code page both live in the `HEADER` section, at the very start of the file,
 //! so the encoding can be chosen from a short prefix without reading the whole thing twice.
 
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 
 use encoding_rs::Encoding;
 
-/// How much of the file to sniff. `$ACADVER` is the first header variable AutoCAD writes and
-/// `$DWGCODEPAGE` follows within a few dozen, so this is generous.
-const SNIFF_BYTES: usize = 64 * 1024;
-
 /// Read and parse a DXF file, choosing the text encoding from its header.
 pub fn load(path: impl AsRef<Path>) -> Result<dxf::Drawing, String> {
     let path = path.as_ref();
-    let head = read_prefix(path).map_err(|e| format!("Could not read this file: {e}"))?;
-    if let Some(msg) = unsupported_format(&head) {
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read this file: {e}"))?;
+    if let Some(msg) = unsupported_format(&bytes) {
         return Err(msg);
     }
-    let encoding = sniff(&head);
-    dxf::Drawing::load_file_with_encoding(path, encoding)
+    let encoding = sniff(&bytes);
+    let bytes = sign_wrap_32bit_fields(bytes);
+    let bytes = if encoding == encoding_rs::UTF_8 { rejoin_split_utf8(bytes) } else { bytes };
+    let bytes = strip_thumbnail(bytes);
+    dxf::Drawing::load_with_encoding(&mut std::io::Cursor::new(bytes), encoding)
         .map_err(|e| format!("Could not read this file: {e}"))
+}
+
+/// Group codes whose value is a 32-bit integer.
+///
+/// Everything else is left alone: rewriting a code that turns out to hold a string would corrupt
+/// it, and plenty of string fields contain long digit runs.
+fn is_32bit_field(code: i64) -> bool {
+    matches!(code, 90..=99 | 420..=429 | 440..=449 | 1071)
+}
+
+/// Re-interpret out-of-range 32-bit fields as signed.
+///
+/// True colour is written as `0xC2RRGGBB`, which is 3.2 billion — above `i32::MAX`. AutoCAD and
+/// LibreDWG both emit it unsigned, and the parser reads these fields as `i32`, so a real file
+/// converted from DWG fails outright with "number too large to fit in target type". The two
+/// spellings are the same 32 bits, so subtracting 2^32 is a reinterpretation rather than a change
+/// of value.
+///
+/// The buffer is returned untouched, without reallocating, when nothing needs it — which is every
+/// file that was not round-tripped through a converter.
+fn sign_wrap_32bit_fields(bytes: Vec<u8>) -> Vec<u8> {
+    /// A DXF body is pairs of lines: a group code, then its value.
+    fn scan(bytes: &[u8], mut on_fix: impl FnMut(usize, usize, i64)) {
+        let mut code: Option<i64> = None;
+        let mut start = 0;
+        for (i, line) in split_lines(bytes) {
+            let s = std::str::from_utf8(line).unwrap_or("").trim();
+            match code.take() {
+                None => {
+                    if let Ok(c) = s.parse::<i64>() {
+                        if is_32bit_field(c) {
+                            code = Some(c);
+                        }
+                    }
+                    start = i;
+                }
+                Some(_) => {
+                    if let Ok(v) = s.parse::<i64>() {
+                        if v > i32::MAX as i64 && v <= u32::MAX as i64 {
+                            on_fix(i, line.len(), v - (1i64 << 32));
+                        }
+                    }
+                }
+            }
+            let _ = start;
+        }
+    }
+
+    let mut fixes: Vec<(usize, usize, i64)> = Vec::new();
+    scan(&bytes, |at, len, v| fixes.push((at, len, v)));
+    if fixes.is_empty() {
+        return bytes;
+    }
+
+    let mut out = Vec::with_capacity(bytes.len() + fixes.len());
+    let mut cursor = 0;
+    for (at, len, v) in fixes {
+        out.extend_from_slice(&bytes[cursor..at]);
+        // Keep the original field width where the replacement fits, so alignment-sensitive
+        // readers see the same shape.
+        out.extend_from_slice(v.to_string().as_bytes());
+        cursor = at + len;
+    }
+    out.extend_from_slice(&bytes[cursor..]);
+    out
+}
+
+/// Remove the `THUMBNAILIMAGE` section.
+///
+/// It holds a preview bitmap for a file browser — nothing a viewer draws. The parser decodes it
+/// eagerly and rejects the whole drawing when the bitmap has a header it does not recognise, which
+/// is how a converted file loses its geometry over a picture of itself.
+fn strip_thumbnail(bytes: Vec<u8>) -> Vec<u8> {
+    let lines: Vec<(usize, &[u8])> = split_lines(&bytes).collect();
+    let named = |i: usize, want: &str| {
+        lines.get(i).is_some_and(|(_, l)| std::str::from_utf8(l).unwrap_or("").trim() == want)
+    };
+
+    // `0 / SECTION` then `2 / THUMBNAILIMAGE`, up to and including the matching `0 / ENDSEC`.
+    let Some(start) = (0..lines.len().saturating_sub(3))
+        .find(|&i| named(i, "0") && named(i + 1, "SECTION") && named(i + 3, "THUMBNAILIMAGE"))
+    else {
+        return bytes;
+    };
+    let Some(end) = (start + 4..lines.len() - 1).find(|&i| named(i, "0") && named(i + 1, "ENDSEC"))
+    else {
+        return bytes;
+    };
+
+    let from = lines[start].0;
+    let to = lines.get(end + 2).map(|(o, _)| *o).unwrap_or(bytes.len());
+    let mut out = Vec::with_capacity(bytes.len() - (to - from));
+    out.extend_from_slice(&bytes[..from]);
+    out.extend_from_slice(&bytes[to..]);
+    out
+}
+
+/// Move a truncated UTF-8 sequence at the end of a value line onto the start of the next one.
+///
+/// LibreDWG chunks long MTEXT into 250-*byte* pieces across group 3 continuations, and counts
+/// bytes rather than characters — so a multi-byte character can be cut in half, with its lead byte
+/// ending one chunk and its continuation bytes starting the next. The parser decodes line by line,
+/// so it sees two malformed strings and rejects the whole file, even though the chunks concatenate
+/// into perfectly good text.
+///
+/// Moving the split onto a character boundary preserves the text exactly: the chunks are joined by
+/// the reader anyway, so where they divide carries no meaning.
+fn rejoin_split_utf8(bytes: Vec<u8>) -> Vec<u8> {
+    // How many trailing bytes begin a multi-byte sequence that the line does not finish.
+    fn dangling(line: &[u8]) -> usize {
+        for back in 1..=3.min(line.len()) {
+            let b = line[line.len() - back];
+            if b & 0b1100_0000 == 0b1000_0000 {
+                continue; // a continuation byte; keep walking back to its lead
+            }
+            let need = match b {
+                0xC2..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF4 => 4,
+                _ => return 0, // ASCII or invalid: nothing to carry
+            };
+            return if need > back { back } else { 0 };
+        }
+        0
+    }
+
+    let lines: Vec<(usize, &[u8])> = split_lines(&bytes).collect();
+    // Value lines are every other line, starting at index 1.
+    let mut moves: Vec<(usize, usize)> = Vec::new();
+    for i in (1..lines.len()).step_by(2) {
+        let n = dangling(lines[i].1);
+        if n > 0 && i + 2 < lines.len() {
+            moves.push((i, n));
+        }
+    }
+    if moves.is_empty() {
+        return bytes;
+    }
+
+    // Rebuild, carrying each dangling tail to the front of the following value line.
+    let mut out: Vec<Vec<u8>> = lines.iter().map(|(_, l)| l.to_vec()).collect();
+    for (i, n) in moves {
+        let cut = out[i].len() - n;
+        let tail: Vec<u8> = out[i].split_off(cut);
+        let next = i + 2;
+        let mut joined = tail;
+        joined.extend_from_slice(&out[next]);
+        out[next] = joined;
+    }
+    let mut joined = Vec::with_capacity(bytes.len() + 8);
+    for line in out {
+        joined.extend_from_slice(&line);
+        joined.extend_from_slice(b"\r\n");
+    }
+    joined
+}
+
+/// Iterate `(offset, line)` over a byte buffer, handling both LF and CRLF.
+fn split_lines(bytes: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        if at >= bytes.len() {
+            return None;
+        }
+        let start = at;
+        let end =
+            bytes[at..].iter().position(|&b| b == b'\n').map(|p| at + p).unwrap_or(bytes.len());
+        at = end + 1;
+        let mut line = &bytes[start..end];
+        if line.last() == Some(&b'\r') {
+            line = &line[..line.len() - 1];
+        }
+        Some((start, line))
+    })
 }
 
 /// Recognise formats we cannot read, so they get an answer rather than a parse error.
@@ -64,21 +235,6 @@ pub fn unsupported_format(head: &[u8]) -> Option<String> {
         );
     }
     None
-}
-
-fn read_prefix(path: &Path) -> std::io::Result<Vec<u8>> {
-    let mut f = File::open(path)?;
-    let mut buf = vec![0u8; SNIFF_BYTES];
-    let mut filled = 0;
-    // A short read is not EOF, so keep going until the buffer is full or the file runs out.
-    while filled < buf.len() {
-        match f.read(&mut buf[filled..])? {
-            0 => break,
-            n => filled += n,
-        }
-    }
-    buf.truncate(filled);
-    Ok(buf)
 }
 
 /// Pick a text encoding from a DXF header prefix.

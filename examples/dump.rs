@@ -26,6 +26,7 @@ fn main() {
                 }
                 CurveSource::Ellipse { .. } => "ellipse".into(),
                 CurveSource::Spline { index } => format!("spline#{index}"),
+                CurveSource::Bulge { index } => format!("bulge#{index}"),
             };
             println!(
                 "  poly len={:<4} closed={:<5} L{:<2} {:?} bbox=({:.1},{:.1})-({:.1},{:.1}) {k}",

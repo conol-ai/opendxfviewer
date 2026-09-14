@@ -22,7 +22,8 @@ use dxf::{Block, Drawing, Point, Vector};
 use crate::aci;
 use crate::geom::{v2, v3, Aabb, Xform, V2, V3};
 use crate::scene::{
-    CurveSource, Dot, HAlign, Layer, Linetype, Poly, Rgb, Scene, Text, Tri, Units, VAlign,
+    BulgePoly, CurveSource, Dot, HAlign, Layer, Linetype, Poly, Rgb, Scene, Text, Tri, Units,
+    VAlign,
 };
 use crate::tessellate::{self as tess, Tol};
 
@@ -508,9 +509,7 @@ impl<'a> Ctx<'a> {
                     .map(|v| (x.apply(v2(v.x, v.y)), bulge_for(&x, v.bulge)))
                     .collect();
                 let closed = p.is_closed();
-                let mut out = Vec::with_capacity(pts.len() * 2);
-                tess::flatten_bulge_poly(&pts, closed, tol_for(&pts, q), &mut out);
-                self.push_poly(out, closed, st, CurveSource::None);
+                self.bulge_poly(pts, closed, st, q);
             }
 
             EntityType::Polyline(p) => self.polyline(p, e, inh, st, q),
@@ -744,9 +743,26 @@ impl<'a> Ctx<'a> {
             .map(|v| (x.apply(v2(v.location.x, v.location.y)), bulge_for(&x, v.bulge)))
             .collect();
         let closed = p.is_closed();
+        self.bulge_poly(pts, closed, st, q);
+    }
+
+    /// Flatten a bulged polyline, retaining the bulges when any of them actually curve.
+    ///
+    /// A polyline with no bulges is a plain chain of segments and needs nothing kept; one with
+    /// bulges is re-tessellated by the renderer as the view zooms in, which is what stops a
+    /// rounded corner looking like three straight cuts.
+    fn bulge_poly(&mut self, pts: Vec<(V2, f64)>, closed: bool, st: Style, q: f64) {
         let mut out = Vec::with_capacity(pts.len() * 2);
         tess::flatten_bulge_poly(&pts, closed, tol_for(&pts, q), &mut out);
-        self.push_poly(out, closed, st, CurveSource::None);
+        let curved = pts.iter().any(|(_, b)| *b != 0.0 && b.is_finite());
+        let source = if curved {
+            let index = self.scene.bulges.len() as u32;
+            self.scene.bulges.push(BulgePoly { pts, closed });
+            CurveSource::Bulge { index }
+        } else {
+            CurveSource::None
+        };
+        self.push_poly(out, closed, st, source);
     }
 
     fn spline(&mut self, s: &dxf::entities::Spline, inh: &Inherit, st: Style, q: f64) {
@@ -1270,6 +1286,27 @@ pub fn mtext_lines(raw: &str) -> Vec<String> {
                     for n in it.by_ref() {
                         if n == ';' {
                             break;
+                        }
+                    }
+                }
+                // \U+XXXX is a literal code point, which is how MTEXT carries anything its own
+                // encoding cannot: the degree sign, plus-minus, superscripts. Left undecoded it
+                // shows up as the text "U+00B1" in the middle of a tolerance.
+                Some('U') if it.peek() == Some(&'+') => {
+                    it.next();
+                    let hex: String = (0..4)
+                        .map_while(|_| {
+                            it.peek().copied().filter(|c| c.is_ascii_hexdigit()).inspect(|_| {
+                                it.next();
+                            })
+                        })
+                        .collect();
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        Some(c) => lines.last_mut().unwrap().push(c),
+                        // Not a code point after all; keep what was written rather than eat it.
+                        None => {
+                            lines.last_mut().unwrap().push_str("U+");
+                            lines.last_mut().unwrap().push_str(&hex);
                         }
                     }
                 }
@@ -1830,6 +1867,14 @@ mod tests {
         assert_eq!(mtext_lines(r"\S1#2; nominal"), ["1/2 nominal"]);
         // Control codes are decoded in MTEXT too.
         assert_eq!(mtext_lines("%%c20"), ["\u{2300}20"]);
+        // \U+XXXX is a literal code point — how MTEXT carries a degree sign or a plus-minus.
+        assert_eq!(mtext_lines(r"-20\U+00B0C"), ["-20°C"]);
+        assert_eq!(mtext_lines(r"0.30\U+00B10.03"), ["0.30±0.03"]);
+        assert_eq!(mtext_lines(r"cd/m\U+00B2"), ["cd/m²"]);
+        assert_eq!(mtext_lines(r"\U+4E2D\U+6587"), ["中文"]);
+        // Malformed escapes keep their text rather than eating it.
+        assert_eq!(mtext_lines(r"\U+ZZZZ"), ["U+ZZZZ"]);
+        assert_eq!(mtext_lines(r"\U"), ["U"]);
         assert!(mtext_lines("").is_empty());
         assert!(mtext_lines(r"\P\P").is_empty());
     }

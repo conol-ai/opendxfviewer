@@ -36,6 +36,19 @@ pub enum CurveSource {
     Ellipse { center: V2, major: V2, minor: V2, start: f64, sweep: f64 },
     /// A NURBS curve; indices point into [`Scene::splines`].
     Spline { index: u32 },
+    /// A polyline carrying per-vertex bulges; indices point into [`Scene::bulges`].
+    ///
+    /// Kept for the same reason as a spline: rounded corners are how CAD outlines are actually
+    /// drawn, and flattening them once at load leaves them visibly faceted at any closer zoom.
+    Bulge { index: u32 },
+}
+
+/// A polyline with per-vertex bulges, retained so it can be re-tessellated when the view zooms in.
+#[derive(Clone, Debug)]
+pub struct BulgePoly {
+    /// `(position, bulge)`, where the bulge describes the segment *leaving* that vertex.
+    pub pts: Vec<(V2, f64)>,
+    pub closed: bool,
 }
 
 /// A polyline: the single geometric primitive everything else is reduced to.
@@ -229,6 +242,8 @@ pub struct Scene {
     pub texts: Vec<Text>,
     /// NURBS definitions retained so a curve can be re-tessellated when the view zooms in.
     pub splines: Vec<crate::tessellate::Nurbs>,
+    /// Bulged polylines retained for on-demand refinement.
+    pub bulges: Vec<BulgePoly>,
     pub layers: Vec<Layer>,
     pub linetypes: Vec<Linetype>,
     pub bounds: Aabb,
