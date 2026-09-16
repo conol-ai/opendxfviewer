@@ -101,6 +101,32 @@ That matters for batching: a uniform difference **splits the draw call**, and
 `find_appendable_drawcall` compares all 256 uniform slots per candidate. Per-entity data such as
 colour and line width must be an instance, or emission becomes quadratic.
 
+## Deriving from `DrawText`
+
+Two things that work when deriving from `DrawQuad` do not carry over.
+
+- **An odd base is padded for you — do not pad it yourself.** `DrawVars::as_slice` reads the
+  instance floats straight out of memory: the DSL `instance`s at the tail of `DrawVars`, then the
+  `#[calc]` / `#[live]` fields that follow it in the struct, and on into a deriving struct's
+  fields. `DrawText` has 19 floats of those, so `repr(C)` pads it to 8 bytes before the derived
+  fields begin. `draw_vars.rs` knows: `recur_expand` adds one padding slot to the shader mapping
+  for every *nested* base with an odd count ("insert padding"), so `#[deref] draw_super: DrawText`
+  plus `#[calc]` fields does line up — `DrawQuad`, with 10, never needed it. A hand-written pad
+  field, or anything after the deref that takes memory without being a shader field, would put
+  the shift back. `canvas.rs` avoids the question: its per-run values are DSL instances —
+  `instance anchor: vec2(0.0, 0.0)` inside `draw_text: { … }` — written with
+  `draw_vars.set_var_instance(cx, id!(anchor), &[x, y])`. They live inside `DrawVars`, ahead of
+  `rect_pos`, and need no derived type and no `LiveHook` boilerplate.
+- **`draw_clip` is not yours.** `DrawText::draw_abs` emits through `begin_many_aligned_instances`,
+  and when the enclosing turtle ends, every aligned instance has its `draw_clip` overwritten with
+  the turtle's clip — which is NaN on any axis the turtle does not clip. A shader that needs a clip
+  it can trust carries its own instance.
+
+Overriding `fn vertex` / `fn pixel` inside `draw_text: { … }` works like any widget's `draw_bg`
+override, and the base's `self.sdf(…)` and `self.get_color()` stay callable. `canvas.rs` uses this
+to rotate text, which `DrawText` itself cannot do: it lays the run out upright and the vertex
+shader turns each glyph about the run's anchor.
+
 ## `cx.begin_many_instances`, not `DrawQuad::begin_many_instances`
 
 `DrawQuad`'s method uses the *aligned* variant, which registers an align entry. Every enclosing

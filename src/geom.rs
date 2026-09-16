@@ -140,6 +140,12 @@ impl V3 {
     }
 }
 
+impl Add for V3 {
+    type Output = V3;
+    fn add(self, o: V3) -> V3 {
+        v3(self.x + o.x, self.y + o.y, self.z + o.z)
+    }
+}
 impl Sub for V3 {
     type Output = V3;
     fn sub(self, o: V3) -> V3 {

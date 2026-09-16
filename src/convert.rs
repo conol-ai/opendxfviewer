@@ -919,8 +919,7 @@ impl<'a> Ctx<'a> {
             &decode_control_codes(r.value),
             x.apply(anchor),
             r.height,
-            r.rotation.to_radians(),
-            r.width_factor,
+            r.orient(),
             halign(r.halign),
             valign_for(r.halign, r.valign),
             x,
@@ -934,8 +933,7 @@ impl<'a> Ctx<'a> {
         s: &str,
         pos: V2,
         height: f64,
-        rotation: f64,
-        width_factor: f64,
+        orient: Orient,
         halign: HAlign,
         valign: VAlign,
         x: &Xform,
@@ -945,13 +943,14 @@ impl<'a> Ctx<'a> {
         if s.is_empty() || !pos.is_finite() {
             return;
         }
-        // The transform carries the block's scale and rotation; text has to follow both.
+        // The transform carries the block's scale, rotation and mirroring; text follows all three.
         let scale = x.mean_scale();
         let height = height * scale;
         if !height.is_finite() || height <= 0.0 {
             return;
         }
-        let rotation = rotation + x.apply_dir(v2(1.0, 0.0)).angle();
+        let (rotation, flip) = orient.placed(x);
+        let width_factor = orient.width_factor;
         let width_factor =
             if width_factor.is_finite() && width_factor > 0.0 { width_factor } else { 1.0 };
         // A `Text` owns its string, and a block of labels under a MINSERT copies them per cell.
@@ -961,13 +960,14 @@ impl<'a> Ctx<'a> {
             self.truncated = true;
             return;
         }
-        let bbox = text_bbox(s, pos, height, rotation, width_factor, halign, valign);
+        let bbox = text_bbox(s, pos, height, rotation, width_factor, flip, halign, valign);
         self.scene.texts.push(Text {
             text: s.to_string(),
             pos,
             height,
             rotation,
             width_factor,
+            flip,
             halign,
             valign,
             layer: st.layer,
@@ -988,15 +988,22 @@ impl<'a> Ctx<'a> {
             return;
         }
         let h = m.initial_text_height;
-        // MTEXT rotation comes either as an angle or as an explicit X axis direction.
-        let xdir = vec3(&m.x_axis_direction).xy();
-        let rot = if xdir.len() > 1e-12 { xdir.angle() } else { m.rotation_angle.to_radians() };
+        let (dir, up) = mtext_axes(m);
+        let rot = dir.angle();
+        let orient = Orient {
+            rotation: rot,
+            width_factor: 1.0,
+            backward: false,
+            upside_down: up.dot(dir.perp()) < 0.0,
+        };
         let (ha, va) = attachment(m.attachment_point);
-        let pos = x.apply(pt(&m.insertion_point));
+        let origin = pt(&m.insertion_point);
 
-        // Lines run down the page from the attachment point, perpendicular to the baseline.
+        // Lines run down the page from the attachment point, away from the up direction. They
+        // are laid out in the space the MTEXT was written in and placed through the transform
+        // one by one, so inside a scaled or rotated block the lines move with the block.
         let line_h = h * MTEXT_LINE_SPACING;
-        let down = v2(rot.sin(), -rot.cos());
+        let down = -up;
         let block_h = line_h * lines.len() as f64;
         let first_offset = match va {
             VAlign::Top => 0.0,
@@ -1005,12 +1012,40 @@ impl<'a> Ctx<'a> {
         };
         for (i, line) in lines.iter().enumerate() {
             let o = first_offset + line_h * i as f64;
-            self.text(line, pos + down * (o + h), h, rot, 1.0, ha, VAlign::Baseline, &x, st);
+            let pos = x.apply(origin + down * (o + h));
+            self.text(line, pos, h, orient, ha, VAlign::Baseline, &x, st);
         }
     }
 }
 
 // ---------------------------------------------------------------------------------------------
+
+/// An MTEXT's baseline and up directions, projected onto the sheet. Both are unit length when the
+/// text lies in the sheet plane.
+///
+/// The baseline is group 11 when the file writes one, otherwise group 50, an angle in the
+/// entity's own plane. The `dxf` crate fills an absent group 11 with +X rather than with nothing,
+/// so the two cannot be told apart directly. An unwritten vector only matters when group 50 is
+/// non-zero, and a file that writes both makes them agree, so group 50 is used exactly when it is
+/// non-zero and the vector is that default. A written +X therefore always wins, which is what a
+/// mirrored MTEXT relies on: its vector is still +X while its normal is -Z.
+///
+/// The up direction is the normal crossed with the baseline. That is how a mirrored MTEXT is
+/// stored: it has no generation flags, so MIRROR flips its normal to -Z instead, and the glyphs
+/// hang from the other side of the baseline.
+fn mtext_axes(m: &dxf::entities::MText) -> (V2, V2) {
+    let n = vec3(&m.extrusion_direction).norm();
+    let xdir = vec3(&m.x_axis_direction);
+    let written = (xdir - v3(1.0, 0.0, 0.0)).len() > 1e-12 || m.rotation_angle == 0.0;
+    let dir = if written {
+        xdir
+    } else {
+        let (ax, ay) = ocs_basis(n);
+        let (s, c) = m.rotation_angle.to_radians().sin_cos();
+        ax * c + ay * s
+    };
+    (dir.xy(), n.cross(dir).xy())
+}
 
 /// Where a RAY or XLINE is cut off, in drawing units.
 const RAY_LENGTH: f64 = 1e7;
@@ -1029,6 +1064,8 @@ struct TextRun<'a> {
     height: f64,
     rotation: f64,
     width_factor: f64,
+    /// Group 71, the text generation flags.
+    generation: i32,
     halign: HorizontalTextJustification,
     valign: VerticalTextJustification,
 }
@@ -1042,6 +1079,7 @@ impl<'a> TextRun<'a> {
             height: t.text_height,
             rotation: t.rotation,
             width_factor: t.relative_x_scale_factor,
+            generation: t.text_generation_flags,
             halign: t.horizontal_text_justification,
             valign: t.vertical_text_justification,
         }
@@ -1055,9 +1093,49 @@ impl<'a> TextRun<'a> {
             height: a.text_height,
             rotation: a.rotation,
             width_factor: a.relative_x_scale_factor,
+            generation: a.text_generation_flags,
             halign: a.horizontal_text_justification,
             valign: a.vertical_text_justification,
         }
+    }
+
+    fn orient(&self) -> Orient {
+        Orient {
+            rotation: self.rotation.to_radians(),
+            width_factor: self.width_factor,
+            backward: self.generation & 2 != 0,
+            upside_down: self.generation & 4 != 0,
+        }
+    }
+}
+
+/// How a run lies in the space it was written in, before any block reference places it.
+#[derive(Copy, Clone, Debug)]
+struct Orient {
+    /// Baseline angle in radians, counter-clockwise from +X.
+    rotation: f64,
+    width_factor: f64,
+    /// The two generation flags: backward reads the run right to left, mirrored along its
+    /// baseline; upside down mirrors it across the baseline.
+    backward: bool,
+    upside_down: bool,
+}
+
+impl Orient {
+    /// The run's world baseline angle, and whether it is a mirror image, once `x` has placed it.
+    ///
+    /// Both flags and a mirrored block reference are reflections, and all that survives any
+    /// number of them is which side of the baseline the glyphs stand on. So the baseline and the
+    /// up direction are carried through the transform separately and compared at the end. A
+    /// single angle cannot do this: adding the block's rotation to the text's own is wrong in a
+    /// mirrored block, where the text turns the other way.
+    fn placed(&self, x: &Xform) -> (f64, bool) {
+        let e = V2::from_angle(self.rotation);
+        let baseline = if self.backward { -e } else { e };
+        let up = if self.upside_down { -e.perp() } else { e.perp() };
+        let dir = x.apply_dir(baseline);
+        let up = x.apply_dir(up);
+        (dir.angle(), up.dot(dir.perp()) < 0.0)
     }
 }
 
@@ -1345,12 +1423,14 @@ pub fn mtext_lines(raw: &str) -> Vec<String> {
 ///
 /// The real extent depends on the font, which the renderer picks; this only has to be good enough
 /// for culling and zoom-to-fit, so it assumes a fixed advance and errs wide.
+#[allow(clippy::too_many_arguments)]
 fn text_bbox(
     s: &str,
     pos: V2,
     height: f64,
     rotation: f64,
     width_factor: f64,
+    flip: bool,
     halign: HAlign,
     valign: VAlign,
 ) -> Aabb {
@@ -1367,7 +1447,7 @@ fn text_bbox(
         VAlign::Top => -height,
     };
     let dir = V2::from_angle(rotation);
-    let up = dir.perp();
+    let up = if flip { -dir.perp() } else { dir.perp() };
     [(x0, y0), (x0 + w, y0), (x0, y0 + height), (x0 + w, y0 + height)]
         .into_iter()
         .map(|(a, b)| pos + dir * a + up * b)
@@ -1455,7 +1535,7 @@ fn type_name(e: &EntityType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::FRAC_1_SQRT_2;
+    use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
 
     fn load(name: &str) -> Scene {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -1465,6 +1545,13 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    /// Equal as directions: `atan2` hands back a half turn as -150° or 210° depending on the
+    /// rounding of its inputs.
+    fn same_angle(a: f64, b: f64) -> bool {
+        let d = (a - b).rem_euclid(std::f64::consts::TAU);
+        d.min(std::f64::consts::TAU - d) < 1e-9
     }
 
     // -- the arbitrary axis algorithm ------------------------------------------------------
@@ -1800,6 +1887,205 @@ mod tests {
         let s = load("text.dxf");
         let t = s.texts.iter().find(|x| x.text == "Rotated 30deg").unwrap();
         assert!(close(t.rotation, 30f64.to_radians()));
+        assert!(!t.flip);
+        let t = s.texts.iter().find(|x| x.text == "Reads upward").unwrap();
+        assert!(close(t.rotation, FRAC_PI_2), "{}", t.rotation);
+        let t = s.texts.iter().find(|x| x.text == "Reads downward").unwrap();
+        assert!(close(t.rotation, -FRAC_PI_2), "{}", t.rotation);
+        assert!(close(t.width_factor, 0.8));
+    }
+
+    #[test]
+    fn mtext_takes_its_direction_from_the_x_axis_vector_or_the_angle() {
+        let s = load("text.dxf");
+        let by = |t: &str| s.texts.iter().find(|x| x.text == t).unwrap();
+        // Group 11 when the file writes one.
+        let t = by("Up the page");
+        assert!(close(t.rotation, FRAC_PI_2) && !t.flip, "{t:?}");
+        // Group 50 when it does not; the crate fills the missing vector with +X, which must not
+        // be mistaken for a written one.
+        let t = by("Rot 50");
+        assert!(close(t.rotation, FRAC_PI_2) && !t.flip, "{t:?}");
+        let t = by("MText line one");
+        assert!(close(t.rotation, 0.0) && !t.flip, "{t:?}");
+    }
+
+    #[test]
+    fn generation_flags_are_read_from_the_file() {
+        let s = load("text.dxf");
+        let by = |t: &str| s.texts.iter().find(|x| x.text == t).unwrap();
+        assert!(close(by("Upside down").rotation, 0.0) && by("Upside down").flip);
+        assert!(same_angle(by("Backward").rotation, PI) && by("Backward").flip);
+        assert!(same_angle(by("Both flags").rotation, PI) && !by("Both flags").flip);
+    }
+
+    /// A two-line MTEXT at the origin with the given normal and X axis direction.
+    fn mtext_with(normal: (f64, f64, f64), xdir: (f64, f64)) -> Scene {
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        dr.add_entity(Entity::new(EntityType::MText(MText {
+            text: "one\\Ptwo".into(),
+            initial_text_height: 1.0,
+            extrusion_direction: Vector::new(normal.0, normal.1, normal.2),
+            x_axis_direction: Vector::new(xdir.0, xdir.1, 0.0),
+            ..Default::default()
+        })));
+        convert(&dr, &Options::default())
+    }
+
+    #[test]
+    fn a_mirrored_mtext_carries_its_mirror_in_the_normal() {
+        // MTEXT has no generation flags; MIRROR flips its normal instead. Up is the normal
+        // crossed with the baseline, so under -Z the glyphs hang below the baseline and the
+        // lines stack upward from a top-left insertion point.
+        let s = mtext_with((0.0, 0.0, -1.0), (1.0, 0.0));
+        assert_eq!(s.texts.len(), 2);
+        assert!(close(s.texts[0].rotation, 0.0) && s.texts[0].flip, "{:?}", s.texts[0]);
+        assert!(close(s.texts[0].pos.y, 1.0), "{:?}", s.texts[0].pos);
+        assert!(s.texts[1].pos.y > s.texts[0].pos.y);
+        // Mirrored across a vertical line: -Z with the baseline pointing -X is still a mirror
+        // image, reading right to left with the glyphs upright.
+        let s = mtext_with((0.0, 0.0, -1.0), (-1.0, 0.0));
+        assert!(same_angle(s.texts[0].rotation, PI) && s.texts[0].flip, "{:?}", s.texts[0]);
+        // Whereas -X under the usual +Z normal is a half turn, not a mirror image.
+        let s = mtext_with((0.0, 0.0, 1.0), (-1.0, 0.0));
+        assert!(same_angle(s.texts[0].rotation, PI) && !s.texts[0].flip, "{:?}", s.texts[0]);
+    }
+
+    #[test]
+    fn an_mtext_angle_is_measured_in_its_own_plane() {
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        dr.add_entity(Entity::new(EntityType::MText(MText {
+            text: "one".into(),
+            initial_text_height: 1.0,
+            extrusion_direction: Vector::new(0.0, 0.0, -1.0),
+            rotation_angle: 180.0,
+            ..Default::default()
+        })));
+        let s = convert(&dr, &Options::default());
+        // The OCS of -Z has its X axis along world -X, so a half turn in that plane is the world
+        // +X baseline of a mirrored run: the same picture as a written vector of +X under -Z.
+        assert!(close(s.texts[0].rotation, 0.0) && s.texts[0].flip, "{:?}", s.texts[0]);
+    }
+
+    /// A drawing with one TEXT at the origin, 30° up, carrying the given generation flags.
+    fn flagged(flags: i32) -> Scene {
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        dr.add_entity(Entity::new(EntityType::Text(Text {
+            value: "T".into(),
+            text_height: 1.0,
+            rotation: 30.0,
+            text_generation_flags: flags,
+            ..Default::default()
+        })));
+        convert(&dr, &Options::default())
+    }
+
+    #[test]
+    fn text_generation_flags_are_reflections_of_the_run() {
+        // Upside down mirrors the glyphs across the baseline, which keeps the baseline itself.
+        let t = &flagged(4).texts[0];
+        assert!(close(t.rotation, 30f64.to_radians()) && t.flip, "{t:?}");
+        // Backward mirrors along the baseline, so the run reads the other way; that is the same
+        // picture as a half turn plus a flip, which is how it is stored.
+        let t = &flagged(2).texts[0];
+        assert!(same_angle(t.rotation, 210f64.to_radians()) && t.flip, "{t:?}");
+        // Both together cancel into a plain half turn.
+        let t = &flagged(6).texts[0];
+        assert!(same_angle(t.rotation, 210f64.to_radians()) && !t.flip, "{t:?}");
+        assert!(!flagged(0).texts[0].flip);
+    }
+
+    #[test]
+    fn a_flipped_run_extends_below_its_baseline() {
+        let plain = &flagged(0).texts[0];
+        let flipped = &flagged(4).texts[0];
+        // 30° up and to the right: the glyphs of the plain run rise above the anchor, the
+        // mirrored run's hang below it, and both start at the same point.
+        assert!(plain.bbox.max.y > 0.5 && plain.bbox.min.y > -1e-9, "{:?}", plain.bbox);
+        assert!(flipped.bbox.min.y < -0.5 && flipped.bbox.max.y > 0.0, "{:?}", flipped.bbox);
+        assert!(close(plain.bbox.size().x, flipped.bbox.size().x));
+    }
+
+    /// A block holding one 30° TEXT, placed by an INSERT with the given scale and rotation.
+    fn placed_text(sx: f64, sy: f64, rot: f64) -> Scene {
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        let mut b = dxf::Block { name: "T".into(), ..Default::default() };
+        b.entities.push(Entity::new(EntityType::Text(Text {
+            value: "T".into(),
+            text_height: 1.0,
+            rotation: 30.0,
+            ..Default::default()
+        })));
+        dr.add_block(b);
+        dr.add_entity(Entity::new(EntityType::Insert(Insert {
+            name: "T".into(),
+            x_scale_factor: sx,
+            y_scale_factor: sy,
+            rotation: rot,
+            ..Default::default()
+        })));
+        convert(&dr, &Options::default())
+    }
+
+    #[test]
+    fn text_in_a_rotated_block_turns_with_it() {
+        let t = &placed_text(1.0, 1.0, 45.0).texts[0];
+        assert!(close(t.rotation, 75f64.to_radians()) && !t.flip, "{t:?}");
+    }
+
+    #[test]
+    fn text_in_a_mirrored_block_is_a_mirror_image() {
+        // Mirroring across Y sends a 30° baseline to 150°, not to 30° + 180°: the run turns the
+        // other way, and its glyphs now stand on the clockwise side of the baseline.
+        let t = &placed_text(-1.0, 1.0, 0.0).texts[0];
+        assert!(close(t.rotation, 150f64.to_radians()) && t.flip, "{t:?}");
+        // Mirroring across X instead.
+        let t = &placed_text(1.0, -1.0, 0.0).texts[0];
+        assert!(close(t.rotation, -30f64.to_radians()) && t.flip, "{t:?}");
+        // Two mirrors are a half turn, which is not a mirror image.
+        let t = &placed_text(-1.0, -1.0, 0.0).texts[0];
+        assert!(same_angle(t.rotation, 210f64.to_radians()) && !t.flip, "{t:?}");
+    }
+
+    /// A block holding a two-line MTEXT, placed by an INSERT with the given scale and rotation.
+    fn mtext_in_block(scale: f64, rot: f64) -> Scene {
+        use dxf::entities::*;
+        let mut dr = Drawing::new();
+        let mut b = dxf::Block { name: "M".into(), ..Default::default() };
+        b.entities.push(Entity::new(EntityType::MText(MText {
+            text: "one\\Ptwo".into(),
+            initial_text_height: 1.0,
+            ..Default::default()
+        })));
+        dr.add_block(b);
+        dr.add_entity(Entity::new(EntityType::Insert(Insert {
+            name: "M".into(),
+            x_scale_factor: scale,
+            y_scale_factor: scale,
+            rotation: rot,
+            ..Default::default()
+        })));
+        convert(&dr, &Options::default())
+    }
+
+    #[test]
+    fn mtext_lines_inside_a_block_move_with_the_block() {
+        // The line spacing is in the block's units, so it scales with the block.
+        let s = mtext_in_block(3.0, 0.0);
+        assert_eq!(s.texts.len(), 2, "{:?}", s.texts);
+        let gap = (s.texts[0].pos - s.texts[1].pos).len();
+        assert!(close(gap, 3.0 * MTEXT_LINE_SPACING), "gap {gap}");
+        assert!(close(s.texts[0].height, 3.0));
+        // And it turns with the block: the block's "down the page" is world +X after a quarter
+        // turn, which a scaled-but-untransformed offset would get wrong.
+        let s = mtext_in_block(1.0, 90.0);
+        let d = s.texts[1].pos - s.texts[0].pos;
+        assert!(close(d.x, MTEXT_LINE_SPACING) && close(d.y, 0.0), "{d:?}");
+        assert!(close(s.texts[0].rotation, FRAC_PI_2) && !s.texts[0].flip);
     }
 
     #[test]

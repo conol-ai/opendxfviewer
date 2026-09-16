@@ -176,20 +176,30 @@ def spline(ctrl, knots, degree=3, closed=False, layer="0", color=None, weights=N
     return chunk(*p)
 
 
-def text(x, y, h, s, rot=0.0, layer="0", color=None, halign=0, valign=0, x2=None, y2=None):
+def text(x, y, h, s, rot=0.0, layer="0", color=None, halign=0, valign=0, x2=None, y2=None,
+         wf=None, flags=None):
+    """wf: relative X scale (41); flags: generation flags (71), 2 = backward, 4 = upside down."""
     p = [(0, "TEXT"), (8, layer)]
     if color is not None: p.append((62, color))
-    p += [(10, x), (20, y), (30, 0.0), (40, h), (1, s), (50, rot), (72, halign)]
+    p += [(10, x), (20, y), (30, 0.0), (40, h), (1, s), (50, rot)]
+    if wf is not None: p.append((41, wf))
+    if flags is not None: p.append((71, flags))
+    p.append((72, halign))
     if x2 is not None:
         p += [(11, x2), (21, y2), (31, 0.0)]
     p.append((73, valign))
     return chunk(*p)
 
 
-def mtext(x, y, h, s, width=0.0, attach=1, rot=0.0, layer="0", color=None):
+def mtext(x, y, h, s, width=0.0, attach=1, rot=0.0, layer="0", color=None, xdir=None):
+    """xdir: an explicit X axis direction (11/21/31), which AutoCAD writes instead of 50."""
     p = [(0, "MTEXT"), (8, layer)]
     if color is not None: p.append((62, color))
-    p += [(10, x), (20, y), (30, 0.0), (40, h), (41, width), (71, attach), (1, s), (50, rot)]
+    p += [(10, x), (20, y), (30, 0.0), (40, h), (41, width), (71, attach), (1, s)]
+    if xdir is not None:
+        p += [(11, xdir[0]), (21, xdir[1]), (31, 0.0)]
+    else:
+        p.append((50, rot))
     return chunk(*p)
 
 
@@ -350,6 +360,17 @@ def f_text():
                    x2=(0 if ha or va else None), y2=(y if ha or va else None), layer="NOTES"))
     d.add(text(0, 130, 8, "Rotated 30deg", rot=30.0, color=3))
     d.add(text(0, 160, 8, "UPPER & lower 0123", color=5))
+    # Vertical runs: reading up the page, and down it with a narrow width factor.
+    d.add(text(-20, 0, 6, "Reads upward", rot=90.0, color=3))
+    d.add(text(-30, 160, 6, "Reads downward", rot=270.0, wf=0.8, color=3))
+    # The generation flags: mirrored along the baseline, across it, and both.
+    d.add(text(120, 150, 6, "Backward", flags=2, color=6))
+    d.add(text(120, 135, 6, "Upside down", flags=4, color=6))
+    d.add(text(120, 120, 6, "Both flags", flags=6, color=6))
+    # An MTEXT whose orientation is a direction vector rather than an angle.
+    d.add(mtext(240, 0, 6, "Up the page", attach=1, xdir=(0.0, 1.0), color=4))
+    # The same orientation written as group 50 alone, as dxflib-based writers do.
+    d.add(mtext(260, 0, 6, "Rot 50", attach=1, rot=90.0, color=4))
     d.add(mtext(120, 100, 6, "MText line one\\Pline two\\Pline three", width=80, attach=1))
     d.add(mtext(120, 40, 6, "{\\C1;colored} and \\L underlined\\l tokens", width=80, attach=5, color=4))
     d.add(text(120, 0, 6, "", color=2))          # empty string

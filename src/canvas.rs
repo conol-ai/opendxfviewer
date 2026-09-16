@@ -99,9 +99,56 @@ live_design! {
         draw_bg: { color: #1b1b1e }
         draw_seg: {}
         draw_tri: {}
+        // Text that can be turned, mirrored and stretched.
+        //
+        // DrawText clamps each glyph quad to the clip rectangle in its vertex shader, which only
+        // makes sense for upright text. This one takes the quad DrawText laid out for an upright
+        // run and maps it through the run's own basis about the run's anchor: `along` is the
+        // baseline direction times the width factor, `down` the direction the glyphs hang, so
+        // rotation, mirroring and stretch all cost the same two vectors. The clip moves to the
+        // pixel shader, as in DrawSeg, and comes from the canvas rather than the turtle: aligned
+        // instances get their `draw_clip` rewritten at the end of the enclosing turtle, so it is
+        // not something this shader can rely on.
+        //
+        // The per-run values are DSL instances rather than fields of a derived struct: no extra
+        // type, no LiveHook boilerplate, and nothing riding on how the shader mapping pads an
+        // odd-sized base (see the Makepad notes).
         draw_text: {
             color: #d0d0d4
             text_style: <THEME_FONT_REGULAR> { font_size: 9.0 }
+
+            instance anchor: vec2(0.0, 0.0)
+            instance along: vec2(1.0, 0.0)
+            instance down: vec2(0.0, 1.0)
+            instance clip: vec4(0.0, 0.0, 0.0, 0.0)
+            varying sp: vec2
+
+            fn vertex(self) -> vec4 {
+                let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom_pos);
+                let o = p - self.anchor;
+                let q = self.anchor + self.along * o.x + self.down * o.y;
+                self.sp = q;
+                self.pos = self.geom_pos;
+                self.t = mix(self.t_min, self.t_max, self.geom_pos);
+                self.world = self.view_transform * vec4(q.x, q.y, self.glyph_depth + self.draw_zbias, 1.0);
+                return self.camera_projection * (self.camera_view * self.world);
+            }
+
+            fn pixel(self) -> vec4 {
+                let ins = step(self.clip.xy, self.sp) * step(self.sp, self.clip.zw);
+                let keep = ins.x * ins.y;
+                let dxt = length(dFdx(self.t));
+                let dyt = length(dFdy(self.t));
+                if self.texture_index == 0 {
+                    let scale = (dxt + dyt) * self.grayscale_atlas_size.x * 0.5;
+                    let s = self.sdf(scale, self.t.xy) * keep;
+                    let c = self.get_color();
+                    return s * vec4(c.rgb * c.a, c.a);
+                } else {
+                    let c = sample2d(self.color_texture, self.t) * keep;
+                    return vec4(c.rgb * c.a, c.a);
+                }
+            }
         }
     }
 }
@@ -516,11 +563,12 @@ impl Widget for DxfCanvas {
             }
         }
 
+        self.draw_text.draw_vars.set_var_instance(cx, id!(clip), &[clip.x, clip.y, clip.z, clip.w]);
         for run in &self.batch.runs {
-            // Makepad's text pipeline has no rotation, so rotated DXF text is drawn upright at the
-            // right place rather than skipped. Sizing goes through a measure pass because font size
-            // is in points and DXF text height is in drawing units.
-            let base = self.draw_text.text_style.font_size.max(1.0);
+            // Sizing goes through a measure pass because font size is in points and DXF text
+            // height is in drawing units. The run is laid out upright and unstretched, with the
+            // anchor where its justification says; the shader then turns, mirrors and stretches
+            // every glyph about that anchor, so the offsets below stay upright ones.
             self.draw_text.font_scale = 1.0;
             let laid =
                 self.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), &run.text);
@@ -529,20 +577,24 @@ impl Widget for DxfCanvas {
             self.draw_text.font_scale = scale;
             let w = (laid.size_in_lpxs.width * scale) as f64;
             let th = (h * scale) as f64;
-            let x = match run.halign {
-                HAlign::Left => run.pos.x,
-                HAlign::Center => run.pos.x - w * 0.5,
-                HAlign::Right => run.pos.x - w,
+            let dx = match run.halign {
+                HAlign::Left => 0.0,
+                HAlign::Center => -w * 0.5,
+                HAlign::Right => -w,
             };
             // `draw_abs` positions the top of the run; DXF anchors are relative to the baseline.
-            let y = match run.valign {
-                VAlign::Baseline | VAlign::Bottom => run.pos.y - th * BASELINE_RATIO,
-                VAlign::Middle => run.pos.y - th * 0.5,
-                VAlign::Top => run.pos.y,
+            let dy = match run.valign {
+                VAlign::Baseline | VAlign::Bottom => -th * BASELINE_RATIO,
+                VAlign::Middle => -th * 0.5,
+                VAlign::Top => 0.0,
             };
+            let (along, down) = run.basis();
+            let dv = &mut self.draw_text.draw_vars;
+            dv.set_var_instance(cx, id!(anchor), &[run.pos.x as f32, run.pos.y as f32]);
+            dv.set_var_instance(cx, id!(along), &[along.x as f32, along.y as f32]);
+            dv.set_var_instance(cx, id!(down), &[down.x as f32, down.y as f32]);
             self.draw_text.color = rgba(run.color);
-            self.draw_text.draw_abs(cx, dvec2(x, y), &run.text);
-            let _ = base;
+            self.draw_text.draw_abs(cx, dvec2(run.pos.x + dx, run.pos.y + dy), &run.text);
         }
 
         self.draw_list.end(cx);

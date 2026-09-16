@@ -119,9 +119,12 @@ pub struct Text {
     pub height: f64,
     /// Baseline direction, in radians CCW from +X.
     pub rotation: f64,
-    /// Horizontal stretch applied to glyph advances (DXF group 41). Used for the run's extent,
-    /// which is what culling and zoom-to-fit need; the renderer cannot stretch glyphs.
+    /// Horizontal stretch applied to the glyphs (DXF group 41).
     pub width_factor: f64,
+    /// The run is a mirror image: its up direction is the baseline turned clockwise rather than
+    /// counter-clockwise. Set by the upside-down and backward generation flags, and by a mirrored
+    /// block reference, whose text a CAD program shows mirrored too.
+    pub flip: bool,
     pub halign: HAlign,
     pub valign: VAlign,
     pub layer: u16,

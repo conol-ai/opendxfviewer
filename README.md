@@ -70,6 +70,15 @@ These DXF details are handled once, at load, so the renderer never sees them:
   tolerance relative to each curve's own size — and the curve definition is
   kept, so zooming in re-tessellates rather than magnifying the facets.
 
+- **Text orientation.** A `TEXT` rotation, an `MTEXT` direction vector or
+  flipped normal, the width factor, the backward and upside-down generation
+  flags and a mirrored `INSERT` all reduce at load to a baseline angle, a
+  stretch and one mirror bit.
+  Makepad's text pipeline only lays text out upright, so the canvas lets it do
+  that and then turns, stretches and mirrors every glyph about the run's
+  anchor in the vertex shader. Labels in a mirrored block read mirrored, as
+  they do in CAD.
+
 - **Control codes.** `%%c`, `%%d` and `%%p` become Ø, ° and ±, so a bore
   callout reads as a bore callout, and MTEXT's `\U+XXXX` escapes become the
   characters they name. MTEXT's inline formatting is stripped to its text and
@@ -93,9 +102,8 @@ These DXF details are handled once, at load, so the renderer never sees them:
 - **`HATCH` is not drawn.** The `dxf` crate does not parse it, so the entity
   never reaches us. Hatched regions show their boundary only if the file also
   stores one as a separate entity.
-- **Text is drawn upright.** Makepad's text pipeline has no rotation, so
-  rotated `TEXT` is placed correctly but not rotated. Its extent is still
-  measured, so it participates in zoom-to-fit and culling.
+- **Text is drawn in one font.** A `STYLE`'s font, its oblique angle, and the
+  vertical-text flag are not honoured: every run uses the viewer's own face.
 - **`MTEXT` formatting is stripped**, not rendered: line breaks are honoured,
   inline colour, font and stacking codes are removed.
 - **Splines with only fit points** are approximated with a centripetal

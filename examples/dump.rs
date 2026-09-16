@@ -42,8 +42,16 @@ fn main() {
         }
         for t in &s.texts {
             println!(
-                "  text {:?} at ({:.1},{:.1}) h={} ha={:?} va={:?} {:?}",
-                t.text, t.pos.x, t.pos.y, t.height, t.halign, t.valign, t.color
+                "  text {:?} at ({:.1},{:.1}) h={} rot={:.1}deg{} ha={:?} va={:?} {:?}",
+                t.text,
+                t.pos.x,
+                t.pos.y,
+                t.height,
+                t.rotation.to_degrees(),
+                if t.flip { " mirrored" } else { "" },
+                t.halign,
+                t.valign,
+                t.color
             );
         }
         println!(

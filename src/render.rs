@@ -40,9 +40,31 @@ pub struct Run {
     pub height: f64,
     /// Baseline angle in radians, in screen space (so already Y-flipped).
     pub rotation: f64,
+    /// Horizontal stretch of the glyphs.
+    pub width_factor: f64,
+    /// Mirror image: the glyphs stand on the other side of the baseline. See
+    /// [`crate::scene::Text::flip`].
+    pub flip: bool,
     pub halign: HAlign,
     pub valign: VAlign,
     pub color: Rgb,
+}
+
+impl Run {
+    /// The screen-space images of the run's own axes, `(along, down)`.
+    ///
+    /// A run is laid out upright with its anchor at the origin, `x` along the baseline and `y`
+    /// down the glyphs, as any text renderer does; these two vectors map that frame onto the
+    /// screen. `along` carries the rotation and the width factor, `down` the rotation and the
+    /// mirroring, so an upright unmirrored run at unit width maps through the identity.
+    pub fn basis(&self) -> (V2, V2) {
+        let (s, c) = self.rotation.sin_cos();
+        let along = v2(c, s) * self.width_factor;
+        // Rotating the run turns its down vector with the baseline; a mirror image stands its
+        // glyphs on the other side, which is that vector negated.
+        let down = if self.flip { v2(s, -c) } else { v2(-s, c) };
+        (along, down)
+    }
 }
 
 /// How to draw.
@@ -277,6 +299,8 @@ pub fn build(scene: &Scene, cam: &Camera, style: &Style, out: &mut Batch) {
                     height: h,
                     // Screen Y points down, so a counter-clockwise world angle is clockwise here.
                     rotation: -t.rotation,
+                    width_factor: t.width_factor,
+                    flip: t.flip,
                     halign: t.halign,
                     valign: t.valign,
                     color: t.color,
@@ -988,6 +1012,7 @@ mod tests {
             height: 10.0,
             rotation: 0.5,
             width_factor: 1.0,
+            flip: false,
             halign: HAlign::Left,
             valign: VAlign::Baseline,
             layer: 0,
@@ -1007,6 +1032,55 @@ mod tests {
 
         cam.scale = 0.1; // 1px tall
         assert!(build_now(&s, &cam).runs.is_empty());
+    }
+
+    fn run(rotation: f64, width_factor: f64, flip: bool) -> Run {
+        Run {
+            text: "x".into(),
+            pos: V2::ZERO,
+            height: 10.0,
+            rotation,
+            width_factor,
+            flip,
+            halign: HAlign::Left,
+            valign: VAlign::Baseline,
+            color: Rgb::WHITE,
+        }
+    }
+
+    fn near(a: V2, b: V2) -> bool {
+        a.dist(b) < 1e-9
+    }
+
+    #[test]
+    fn an_upright_run_maps_through_the_identity() {
+        let (along, down) = run(0.0, 1.0, false).basis();
+        assert!(near(along, v2(1.0, 0.0)) && near(down, v2(0.0, 1.0)), "{along:?} {down:?}");
+    }
+
+    #[test]
+    fn a_run_reading_up_the_page_has_its_glyph_tops_to_the_left() {
+        // World 90° arrives as -90° in screen space: the baseline points up the screen, and a
+        // reader tilting their head left sees the glyphs upright, so "down" is to the right.
+        let (along, down) = run(-std::f64::consts::FRAC_PI_2, 1.0, false).basis();
+        assert!(near(along, v2(0.0, -1.0)), "{along:?}");
+        assert!(near(down, v2(1.0, 0.0)), "{down:?}");
+    }
+
+    #[test]
+    fn a_mirrored_run_stands_its_glyphs_on_the_other_side() {
+        let (along, down) = run(-std::f64::consts::FRAC_PI_2, 1.0, true).basis();
+        assert!(near(along, v2(0.0, -1.0)), "{along:?}");
+        assert!(near(down, v2(-1.0, 0.0)), "{down:?}");
+        let (along, down) = run(0.0, 1.0, true).basis();
+        assert!(near(along, v2(1.0, 0.0)) && near(down, v2(0.0, -1.0)), "{along:?} {down:?}");
+    }
+
+    #[test]
+    fn the_width_factor_stretches_along_the_baseline_only() {
+        let (along, down) = run(0.3, 2.5, false).basis();
+        assert!((along.len() - 2.5).abs() < 1e-9 && (down.len() - 1.0).abs() < 1e-9);
+        assert!(along.dot(down).abs() < 1e-9, "the axes stay perpendicular");
     }
 
     /// One horizontal line across the middle of an 800x600 view, with the given DXF lineweight.
