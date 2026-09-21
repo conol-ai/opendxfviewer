@@ -219,9 +219,11 @@ sets `MAKEPAD_PACKAGE_DIR` and copies Makepad's fonts into the archive, because 
 binary built any other way looks for those fonts in the *build* machine's cargo
 registry and panics on a machine that has no such directory.
 
-Pushing a `vX.Y.Z` tag runs that script on four runners — macOS appears twice
-because Makepad cannot cross-compile between Apple architectures — attaches the
-results to a GitHub release, and publishes to crates.io. The same workflow can be
+Pushing a `vX.Y.Z` tag runs that script on a Linux, a Mac and a Windows runner,
+attaches the results to a GitHub release, and publishes to crates.io. There is
+no prebuilt Intel Mac package: Makepad cannot cross-compile between Apple
+architectures, and GitHub's Intel runners now queue for the better part of an
+hour, which a release would have to wait out. Intel Macs build from source. The same workflow can be
 run by hand from the Actions tab to get packages without tagging anything.
 Publishing needs a `CARGO_REGISTRY_TOKEN` secret on the repository; without it the
 release is still cut and only the crates.io step is skipped.

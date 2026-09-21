@@ -51,17 +51,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS is built twice because makepad-platform cannot cross-compile between Apple
-        # architectures (see tools/package.py). The Intel runner is the one GitHub is winding
-        # down, so it is allowed to fail without holding up the rest of a release.
-        include:
-          - os: ubuntu-latest
-          - os: macos-latest
-          - os: macos-13
-            optional: true
-          - os: windows-latest
+        # No Intel Mac package: makepad-platform cannot cross-compile between Apple
+        # architectures (see tools/package.py), so it would have to come from a macos-13
+        # runner, and GitHub now leaves those queued for the better part of an hour — which
+        # a release would wait out, since queue time is not what timeout-minutes bounds.
+        # Intel Macs build from source instead, which is what `cargo install` does anyway.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.optional == true }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -105,11 +101,10 @@ jobs:
             echo "|---|---|"
             for f in dist/*.zip dist/*.tar.gz; do
               case "$f" in
-                *macos-arm64*)  plat="macOS, Apple Silicon" ;;
-                *macos-x86_64*) plat="macOS, Intel" ;;
-                *linux*)        plat="Linux x86_64" ;;
-                *windows*)      plat="Windows x86_64" ;;
-                *)              plat="" ;;
+                *macos*)   plat="macOS, Apple Silicon" ;;
+                *linux*)   plat="Linux x86_64" ;;
+                *windows*) plat="Windows x86_64" ;;
+                *)         plat="" ;;
               esac
               echo "| $plat | \`$(basename "$f")\` |"
             done
@@ -121,7 +116,8 @@ jobs:
             echo "The macOS app is signed ad-hoc rather than notarised, so the first launch needs"
             echo "right-click → **Open** (or \`xattr -dr com.apple.quarantine opendxfviewer.app\`)."
             echo
-            echo "Or build it yourself: \`cargo install opendxfviewer\`."
+            echo "On an Intel Mac, or any platform not listed, build it instead:"
+            echo "\`cargo install opendxfviewer\`."
             echo
             echo "### Checksums"
             echo
