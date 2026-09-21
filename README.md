@@ -206,7 +206,8 @@ cargo run --release -- tests/fixtures/basic.dxf
 ```
 
 Linux additionally needs `libx11-dev libxcursor-dev libgl1-mesa-dev
-libasound2-dev`.
+libasound2-dev libwayland-dev`; the last is for the file dialog, which reaches
+Wayland through the XDG portal.
 
 ### Packaging
 

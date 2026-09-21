@@ -468,10 +468,10 @@ impl AppMain for App {
                     self.open(cx, PathBuf::from(p));
                 }
             }
-            Event::KeyDown(ke) => {
-                if ke.key_code == KeyCode::KeyO && ke.modifiers.logo | ke.modifiers.control {
-                    self.pick_file(cx);
-                }
+            Event::KeyDown(ke)
+                if ke.key_code == KeyCode::KeyO && ke.modifiers.logo | ke.modifiers.control =>
+            {
+                self.pick_file(cx);
             }
             _ => {}
         }
