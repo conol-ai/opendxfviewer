@@ -135,7 +135,10 @@ def archive(staging, payload, out, name):
         with tarfile.open(path, "w:gz") as tar:
             tar.add(payload, arcname=payload.name)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    (out / f"{path.name}.sha256").write_text(f"{digest}  {path.name}\n")
+    # Explicitly LF: on Windows the default translation writes CRLF, and `sha256sum -c` then
+    # reads the carriage return as part of the file name and cannot find the archive.
+    with open(out / f"{path.name}.sha256", "w", newline="\n") as f:
+        f.write(f"{digest}  {path.name}\n")
     return path
 
 
