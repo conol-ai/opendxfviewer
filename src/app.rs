@@ -6,6 +6,7 @@
 //! is handed to a worker and posted back through Makepad's `UiRunner`.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use makepad_widgets::*;
 
@@ -117,6 +118,46 @@ live_design! {
 }
 
 app_main!(App);
+
+/// The file named on the command line, resolved while the working directory is still the one the
+/// command was run from.
+static STARTUP_FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Starts the viewer.
+///
+/// Makepad resolves every resource it draws with — its fonts, its icons — against a path baked in
+/// at compile time, which points into the cargo registry of whichever machine built the binary. A
+/// release package is built with `MAKEPAD_PACKAGE_DIR` set to a relative root and ships a copy of
+/// those files under it, so the lookup becomes relative to the working directory instead. That
+/// only finds them if the working directory is the one the package was unpacked into, so a
+/// packaged build moves there before Makepad starts — after resolving the file argument, which the
+/// user gave relative to wherever they actually were.
+///
+/// A plain `cargo build` bakes in paths that are correct on this machine, so there is nothing to
+/// move to and only the argument is resolved.
+pub fn run() {
+    let arg = std::env::args().nth(1).map(PathBuf::from);
+    // `join` returns an absolute argument unchanged, so this is only a change for relative ones.
+    let arg = match std::env::current_dir() {
+        Ok(cwd) => arg.map(|path| cwd.join(path)),
+        Err(_) => arg,
+    };
+    let _ = STARTUP_FILE.set(arg);
+
+    if option_env!("MAKEPAD_PACKAGE_DIR").is_some() {
+        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(Path::parent) {
+            let _ = std::env::set_current_dir(dir);
+        }
+    }
+
+    app_main();
+}
+
+/// Falls back to reading the argument directly for anything that starts the app without going
+/// through [`run`], such as an example.
+fn startup_file() -> Option<PathBuf> {
+    STARTUP_FILE.get().cloned().unwrap_or_else(|| std::env::args().nth(1).map(PathBuf::from))
+}
 
 #[derive(Live, LiveHook)]
 pub struct App {
@@ -303,9 +344,9 @@ impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // Dashes are on by default, so the box has to start ticked or it contradicts the drawing.
         self.ui.check_box(id!(lt_check)).set_active(cx, render::Style::default().use_linetypes);
-        if let Some(arg) = std::env::args().nth(1) {
+        if let Some(path) = startup_file() {
             // Opening straight from here races the window's own creation, so wait one tick.
-            self.startup_open = Some(PathBuf::from(arg));
+            self.startup_open = Some(path);
             self.startup_timer = cx.start_timeout(0.0);
         }
     }

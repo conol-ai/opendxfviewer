@@ -6,3 +6,6 @@
 # Perf fixtures — regenerate with `python3 tools/gen_fixtures.py --all`
 /tests/fixtures/large.dxf
 /tests/fixtures/huge.dxf
+
+# Release archives from tools/package.py
+/dist/

@@ -17,6 +17,6 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("-h" | "--help") => print!("{USAGE}"),
         Some("-V" | "--version") => println!("opendxfviewer {}", env!("CARGO_PKG_VERSION")),
-        _ => opendxfviewer::app::app_main(),
+        _ => opendxfviewer::app::run(),
     }
 }
