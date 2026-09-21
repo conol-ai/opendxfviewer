@@ -30,7 +30,7 @@ jobs:
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev libwayland-dev
+          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev libpulse-dev libwayland-dev
       - name: Tag must match the version in Cargo.toml
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -73,7 +73,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev libwayland-dev
+          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev libpulse-dev libwayland-dev
       # Builds with MAKEPAD_PACKAGE_DIR and copies Makepad's fonts in beside the binary; see
       # the module comment in tools/package.py for why a bare `cargo build` is not shippable.
       - run: python tools/package.py
@@ -147,7 +147,7 @@ jobs:
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev libwayland-dev
+          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev libpulse-dev libwayland-dev
       # A missing token is not a failed release: the packages are already published, and the
       # crates.io half can be run again once the secret exists.
       - name: Publish to crates.io

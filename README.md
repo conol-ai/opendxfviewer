@@ -206,8 +206,9 @@ cargo run --release -- tests/fixtures/basic.dxf
 ```
 
 Linux additionally needs `libx11-dev libxcursor-dev libgl1-mesa-dev
-libasound2-dev libwayland-dev`; the last is for the file dialog, which reaches
-Wayland through the XDG portal.
+libasound2-dev libpulse-dev libwayland-dev`. Makepad links ALSA and PulseAudio
+whether or not an app makes a sound, and the last is for the file dialog, which
+reaches Wayland through the XDG portal.
 
 ### Packaging
 
