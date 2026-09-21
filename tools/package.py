@@ -30,6 +30,8 @@ import argparse, hashlib, json, os, platform, plistlib, shutil, subprocess, sys,
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# Honoured because CI runners and caches move it, and the built binary has to be found again.
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
 BIN = "opendxfviewer"
 
 # Must match MAKEPAD_PACKAGE_DIR below: it is the directory name baked into the binary.
@@ -51,7 +53,7 @@ def build(target=None, bundle=False):
     if target:
         cmd += ["--target", target]
     run(cmd, cwd=ROOT, env=env)
-    out = ROOT / "target" / (target or "") / "release" / BIN
+    out = TARGET / (target or "") / "release" / BIN
     return out.with_suffix(".exe") if os.name == "nt" else out
 
 
@@ -148,7 +150,7 @@ def main():
     )["packages"][0]["version"]
 
     out = (ROOT / args.out).resolve()
-    staging = ROOT / "target" / "package-staging"
+    staging = TARGET / "package-staging"
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
 
@@ -170,7 +172,8 @@ def main():
         name = payload.name
 
     path = archive(staging, payload, out, name)
-    print(f"\n{path.relative_to(ROOT)}  {path.stat().st_size / 1e6:.1f} MB")
+    shown = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+    print(f"\n{shown}  {path.stat().st_size / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":
