@@ -1,0 +1,161 @@
+name: Release
+
+# Tagging `v0.1.0` cuts a release: it checks the tag against the manifest, builds a package
+# for each desktop platform, attaches them to a GitHub release, and publishes to crates.io.
+# `workflow_dispatch` runs the same build and leaves the packages as run artifacts, which is
+# how to try a release without tagging one.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy, rustfmt }
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev
+      - name: Tag must match the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $manifest" >&2
+            exit 1
+          fi
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --all --locked
+      # Catches a manifest that would fail at `cargo publish` after the release is already public.
+      - run: cargo package --locked
+
+  package:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is built twice because makepad-platform cannot cross-compile between Apple
+        # architectures (see tools/package.py). The Intel runner is the one GitHub is winding
+        # down, so it is allowed to fail without holding up the rest of a release.
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: macos-13
+            optional: true
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional == true }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: package }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev
+      # Builds with MAKEPAD_PACKAGE_DIR and copies Makepad's fonts in beside the binary; see
+      # the module comment in tools/package.py for why a bare `cargo build` is not shippable.
+      - run: python tools/package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: package-*
+          merge-multiple: true
+      - name: Write the release notes
+        run: |
+          {
+            echo "### Downloads"
+            echo
+            echo "| Platform | File |"
+            echo "|---|---|"
+            for f in dist/*.zip dist/*.tar.gz; do
+              case "$f" in
+                *macos-arm64*)  plat="macOS, Apple Silicon" ;;
+                *macos-x86_64*) plat="macOS, Intel" ;;
+                *linux*)        plat="Linux x86_64" ;;
+                *windows*)      plat="Windows x86_64" ;;
+                *)              plat="" ;;
+              esac
+              echo "| $plat | \`$(basename "$f")\` |"
+            done
+            echo
+            echo "The packages carry Makepad's fonts beside the binary, so keep the archive's"
+            echo "layout: the viewer reads them from its own directory. Licences for those files"
+            echo "are in \`THIRD-PARTY-NOTICES.md\` inside each package."
+            echo
+            echo "The macOS app is signed ad-hoc rather than notarised, so the first launch needs"
+            echo "right-click → **Open** (or \`xattr -dr com.apple.quarantine opendxfviewer.app\`)."
+            echo
+            echo "Or build it yourself: \`cargo install opendxfviewer\`."
+            echo
+            echo "### Checksums"
+            echo
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+          } > notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.tar.gz dist/*.sha256 \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes
+
+  publish:
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev
+      # A missing token is not a failed release: the packages are already published, and the
+      # crates.io half can be run again once the secret exists.
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is not set, so crates.io was skipped"
+            exit 0
+          fi
+          cargo publish --locked

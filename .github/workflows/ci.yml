@@ -20,6 +20,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxcursor-dev libgl1-mesa-dev libasound2-dev
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
-      - run: cargo build --release
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --all --locked
+      - run: cargo build --release --locked

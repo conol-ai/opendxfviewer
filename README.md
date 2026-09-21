@@ -1,5 +1,7 @@
 # opendxfviewer
 
+[![CI](https://github.com/conol-ai/opendxfviewer/actions/workflows/ci.yml/badge.svg)](https://github.com/conol-ai/opendxfviewer/actions/workflows/ci.yml)
+
 A fast, open source viewer for DXF drawings, written in Rust with
 [Makepad](https://makepad.dev).
 
@@ -16,9 +18,19 @@ DWG and it will say so rather than failing with a parse error.
 
 ## Install and run
 
+Take a package for your platform from
+[Releases](https://github.com/conol-ai/opendxfviewer/releases), or build it
+yourself:
+
 ```sh
-cargo run --release -- drawing.dxf     # or just `cargo run --release`
+cargo install opendxfviewer            # from crates.io
+cargo run --release -- drawing.dxf     # from a clone; or just `cargo run --release`
 ```
+
+A released package carries Makepad's fonts next to the executable, since Makepad
+resolves them by path rather than embedding them, so keep the archive's layout
+instead of moving the binary out on its own. The macOS app is signed ad-hoc
+rather than notarised, so the first launch needs right-click → **Open**.
 
 A drawing can also be opened with the **Open…** button, `Cmd`/`Ctrl`+`O`, or by
 dropping a `.dxf` file onto the window.
@@ -196,6 +208,22 @@ cargo run --release -- tests/fixtures/basic.dxf
 Linux additionally needs `libx11-dev libxcursor-dev libgl1-mesa-dev
 libasound2-dev`.
 
+### Packaging
+
+`python3 tools/package.py` writes the archive a release is made of into `dist/`:
+a `.app` zip on macOS, a `.tar.gz` on Linux, a `.zip` on Windows, for whichever
+machine it runs on. It is not a plain `cargo build` with a `tar` around it — it
+sets `MAKEPAD_PACKAGE_DIR` and copies Makepad's fonts into the archive, because a
+binary built any other way looks for those fonts in the *build* machine's cargo
+registry and panics on a machine that has no such directory.
+
+Pushing a `vX.Y.Z` tag runs that script on four runners — macOS appears twice
+because Makepad cannot cross-compile between Apple architectures — attaches the
+results to a GitHub release, and publishes to crates.io. The same workflow can be
+run by hand from the Actions tab to get packages without tagging anything.
+Publishing needs a `CARGO_REGISTRY_TOKEN` secret on the repository; without it the
+release is still cut and only the crates.io step is skipped.
+
 ## Layout
 
 | | |
@@ -238,7 +266,14 @@ large performance fixtures, which are not checked in.
 ## License
 
 MIT. The AutoCAD Color Index table in `src/aci.rs` is transcribed from
-[ezdxf](https://github.com/mozman/ezdxf), also MIT.
+[ezdxf](https://github.com/mozman/ezdxf), also MIT. Makepad and the rest of the
+dependency tree are `MIT OR Apache-2.0`.
+
+The released packages additionally contain the fonts Makepad's theme names —
+IBM Plex Sans, Liberation Mono, LXGW WenKai, Noto Color Emoji and Font Awesome's
+icon face, all under the SIL Open Font License. They are listed in
+[`packaging/THIRD-PARTY-NOTICES.md`](packaging/THIRD-PARTY-NOTICES.md), which
+ships inside each package. Nothing in this repository contains a font file.
 
 DXF is a trademark of Autodesk, Inc. This project is not affiliated with
 Autodesk.
